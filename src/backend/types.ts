@@ -53,7 +53,11 @@ export interface OutreachResult {
   role: string;
   company: string;
   seniority: string;
+  conversationInitiator: "self" | "them" | "none";
+  conversationType: string;
   conversationStatus: "new" | "continuation";
+  strategicGoal: string;
+  leverageValue: string;
   outreachAngle: string;
   message: string;
 }

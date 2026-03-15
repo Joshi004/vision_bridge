@@ -110,6 +110,9 @@ CREATE TABLE IF NOT EXISTS leads (
     outreach_angle    TEXT,
     role              TEXT,
     company           TEXT,
+    conversation_type       TEXT,
+    strategic_goal          TEXT,
+    conversation_initiator  TEXT,
     follow_up_count   INTEGER NOT NULL DEFAULT 0,
     max_follow_ups    INTEGER NOT NULL DEFAULT 3,
     initial_sent_at   TEXT,
@@ -203,6 +206,21 @@ export function initDatabase(): void {
 
   // Run schema statements one by one — better-sqlite3's exec() handles multi-statement SQL.
   db.exec(SCHEMA_SQL);
+
+  // Additive migrations for existing databases. Each ALTER TABLE is wrapped in
+  // a try/catch so it silently passes when the column already exists.
+  for (const sql of [
+    "ALTER TABLE leads ADD COLUMN conversation_type TEXT",
+    "ALTER TABLE leads ADD COLUMN strategic_goal TEXT",
+    "ALTER TABLE leads ADD COLUMN conversation_initiator TEXT",
+  ]) {
+    try {
+      db.prepare(sql).run();
+    } catch {
+      // Column already exists — no action needed.
+    }
+  }
+
   seedSenderConfig(db);
 }
 

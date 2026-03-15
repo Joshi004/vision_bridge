@@ -46,6 +46,9 @@ contextBridge.exposeInMainWorld('api', {
   getPromptPreview: () =>
     ipcRenderer.invoke(IPC.PROMPT_PREVIEW),
 
+  getPromptPreviewWithReferral: () =>
+    ipcRenderer.invoke(IPC.PROMPT_PREVIEW_REFERRAL),
+
   checkDuplicate: (url: string) =>
     ipcRenderer.invoke(IPC.LEAD_CHECK_DUPLICATE, { url }),
 

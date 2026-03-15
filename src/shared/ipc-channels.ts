@@ -9,6 +9,7 @@ export const IPC = {
   SENDER_CONFIG_GET: "sender-config:get",
   SENDER_CONFIG_SAVE: "sender-config:save",
   PROMPT_PREVIEW: "sender-config:prompt-preview",
+  PROMPT_PREVIEW_REFERRAL: "sender-config:prompt-preview-referral",
   LEAD_CHECK_DUPLICATE: "lead:check-duplicate",
   LEAD_CREATE_FROM_SCRAPE: "lead:create-from-scrape",
   LEAD_LIST: "lead:list",

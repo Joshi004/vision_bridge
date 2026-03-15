@@ -23,7 +23,11 @@ declare global {
     role: string
     company: string
     seniority: string
+    conversationInitiator: string
+    conversationType: string
     conversationStatus: 'new' | 'continuation'
+    strategicGoal: string
+    leverageValue: string
     outreachAngle: string
     message: string
   }
@@ -213,6 +217,7 @@ declare global {
       getSenderConfig(): Promise<{ success: true; config: SenderConfig } | { error: true; message: string }>
       saveSenderConfig(fields: Partial<SenderConfig>): Promise<{ success: true; config: SenderConfig } | { error: true; message: string }>
       getPromptPreview(): Promise<{ success: true; prompt: string } | { error: true; message: string }>
+      getPromptPreviewWithReferral(): Promise<{ success: true; prompt: string } | { error: true; message: string }>
       checkDuplicate(url: string): Promise<DuplicateCheckResult>
       createLeadFromScrape(url: string, forceScrape: boolean): Promise<CreateLeadFromScrapeResult>
       getLeadsByStage(stage: string): Promise<LeadWithProfile[]>

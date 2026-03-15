@@ -8,6 +8,9 @@ export interface LeadRow {
   outreach_angle: string | null;
   role: string | null;
   company: string | null;
+  conversation_type: string | null;
+  strategic_goal: string | null;
+  conversation_initiator: string | null;
   follow_up_count: number;
   max_follow_ups: number;
   initial_sent_at: string | null;
@@ -252,6 +255,87 @@ export function getLeadsWithProfileByStage(stage: string): LeadWithProfile[] {
     profile: { name: r.name, headline: r.headline, linkedin_url: r.linkedin_url },
     recentMessages: msgMap.get(r.profile_id) ?? [],
   }));
+}
+
+/**
+ * Fetch a single lead by id, enriched with profile data and the 4 most recent
+ * LinkedIn messages. Returns undefined if the lead does not exist.
+ */
+export function getLeadWithProfileById(leadId: number): LeadWithProfile | undefined {
+  const db = getDb();
+
+  type LeadJoinRow = {
+    id: number;
+    profile_id: number;
+    stage: string;
+    initial_message: string | null;
+    outreach_angle: string | null;
+    role: string | null;
+    company: string | null;
+    follow_up_count: number;
+    max_follow_ups: number;
+    initial_sent_at: string | null;
+    last_contacted_at: string | null;
+    next_follow_up_at: string | null;
+    closed_at: string | null;
+    created_at: string;
+    updated_at: string;
+    name: string | null;
+    headline: string | null;
+    linkedin_url: string;
+  };
+
+  const row = db
+    .prepare<number[], LeadJoinRow>(`
+      SELECT
+        l.id, l.profile_id, l.stage, l.initial_message, l.outreach_angle,
+        l.role, l.company, l.follow_up_count, l.max_follow_ups,
+        l.initial_sent_at, l.last_contacted_at, l.next_follow_up_at,
+        l.closed_at, l.created_at, l.updated_at,
+        p.name, p.headline, p.linkedin_url
+      FROM leads l
+      JOIN profiles p ON l.profile_id = p.id
+      WHERE l.id = ?
+    `)
+    .get(leadId) as LeadJoinRow | undefined;
+
+  if (!row) return undefined;
+
+  type MsgRow = { sender: string; text: string; timestamp: string | null };
+
+  const msgRows = db
+    .prepare<number[], MsgRow>(`
+      SELECT sender, text, timestamp
+      FROM (
+        SELECT sender, text, timestamp,
+               ROW_NUMBER() OVER (ORDER BY sort_order DESC) AS rn
+        FROM linkedin_messages
+        WHERE profile_id = ?
+      )
+      WHERE rn <= 4
+      ORDER BY rn DESC
+    `)
+    .all(row.profile_id) as MsgRow[];
+
+  return {
+    id: row.id,
+    profile_id: row.profile_id,
+    stage: row.stage,
+    initial_message: row.initial_message,
+    outreach_angle: row.outreach_angle,
+    role: row.role,
+    company: row.company,
+    follow_up_count: row.follow_up_count,
+    max_follow_ups: row.max_follow_ups,
+    initial_sent_at: row.initial_sent_at,
+    last_contacted_at: row.last_contacted_at,
+    next_follow_up_at: row.next_follow_up_at,
+    closed_at: row.closed_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    profile: { name: row.name, headline: row.headline, linkedin_url: row.linkedin_url },
+    recentMessages: msgRows.map((m) => ({ sender: m.sender, content: m.text, timestamp: m.timestamp })),
+  };
 }
 
 /**

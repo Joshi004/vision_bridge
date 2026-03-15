@@ -27,7 +27,19 @@ type SingleUrlResult =
       cached: boolean
       cachedAt?: string
       profile: { id: number; url: string; name: string | null; headline: string | null; location: string | null }
-      outreach: { id: number; role: string; company: string; seniority: string; conversationStatus: string; outreachAngle: string; message: string }
+      outreach: {
+        id: number
+        role: string
+        company: string
+        seniority: string
+        conversationInitiator: string
+        conversationType: string
+        conversationStatus: string
+        strategicGoal: string
+        leverageValue: string
+        outreachAngle: string
+        message: string
+      }
     }
   | { error: true; needsLogin?: boolean; message: string }
 
@@ -67,7 +79,11 @@ async function processSingleUrl(trimmedUrl: string, forceScrape: boolean, sender
             role: outreach.role,
             company: outreach.company,
             seniority: outreach.seniority,
+            conversationInitiator: outreach.conversationInitiator,
+            conversationType: outreach.conversationType,
             conversationStatus: outreach.conversationStatus,
+            strategicGoal: outreach.strategicGoal,
+            leverageValue: outreach.leverageValue,
             outreachAngle: outreach.outreachAngle,
             message: outreach.message,
           },
@@ -134,7 +150,11 @@ async function processSingleUrl(trimmedUrl: string, forceScrape: boolean, sender
       role: outreach.role,
       company: outreach.company,
       seniority: outreach.seniority,
+      conversationInitiator: outreach.conversationInitiator,
+      conversationType: outreach.conversationType,
       conversationStatus: outreach.conversationStatus,
+      strategicGoal: outreach.strategicGoal,
+      leverageValue: outreach.leverageValue,
       outreachAngle: outreach.outreachAngle,
       message: outreach.message,
     },

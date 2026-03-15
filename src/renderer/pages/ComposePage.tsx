@@ -269,6 +269,7 @@ function SenderConfigSection({ onSaved }: { onSaved?: () => void }) {
 
 function PromptPreviewSection({ refreshKey }: { refreshKey: number }) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [variant, setVariant] = useState<"cold" | "referral">("cold");
   const [prompt, setPrompt] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -277,7 +278,11 @@ function PromptPreviewSection({ refreshKey }: { refreshKey: number }) {
     if (!isExpanded) return;
     setIsLoading(true);
     setError(null);
-    window.api.getPromptPreview().then((result) => {
+    setPrompt(null);
+    const call = variant === "referral"
+      ? window.api.getPromptPreviewWithReferral()
+      : window.api.getPromptPreview();
+    call.then((result) => {
       if ("success" in result && result.success) {
         setPrompt(result.prompt);
       } else if ("error" in result) {
@@ -286,7 +291,7 @@ function PromptPreviewSection({ refreshKey }: { refreshKey: number }) {
     }).finally(() => {
       setIsLoading(false);
     });
-  }, [isExpanded, refreshKey]);
+  }, [isExpanded, variant, refreshKey]);
 
   return (
     <div className="prompt-preview">
@@ -304,6 +309,20 @@ function PromptPreviewSection({ refreshKey }: { refreshKey: number }) {
 
       {isExpanded && (
         <div className="prompt-preview__body">
+          <div className="prompt-preview__variant-tabs">
+            <button
+              className={`prompt-preview__variant-tab${variant === "cold" ? " prompt-preview__variant-tab--active" : ""}`}
+              onClick={() => setVariant("cold")}
+            >
+              Cold Outreach
+            </button>
+            <button
+              className={`prompt-preview__variant-tab${variant === "referral" ? " prompt-preview__variant-tab--active" : ""}`}
+              onClick={() => setVariant("referral")}
+            >
+              Referral Conversation
+            </button>
+          </div>
           {isLoading && (
             <div className="prompt-preview__loading">Loading prompt…</div>
           )}

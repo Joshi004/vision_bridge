@@ -18,6 +18,7 @@ import {
   getProfileLinkedInUrl,
   addToThread,
   getLeadsWithProfileByStage,
+  getLeadWithProfileById,
   updateLeadDraft,
   deleteLead,
   transitionStage,
@@ -42,6 +43,29 @@ function isLinkedInProfileUrl(url: string): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * Safety net: if the LLM classifies a conversation as "referral_inbound"
+ * but there are no self messages in the actual LinkedIn history, the model
+ * has misclassified. Override to "referral_inbound_fresh" so the correct
+ * initial decline message is used rather than a follow-up.
+ */
+function correctConversationType(
+  outreach: ReturnType<typeof parseOutreachResponse>,
+  profileMessages: Array<{ sender: string }>,
+): ReturnType<typeof parseOutreachResponse> {
+  if (outreach.conversationType === 'referral_inbound') {
+    const selfCount = profileMessages.filter((m) => m.sender === 'self').length
+    if (selfCount === 0) {
+      log.error(
+        'ipc/lead',
+        `LLM classified as "referral_inbound" but no self messages exist — overriding to "referral_inbound_fresh"`,
+      )
+      return { ...outreach, conversationType: 'referral_inbound_fresh' }
+    }
+  }
+  return outreach
 }
 
 export function registerLeadHandlers(): void {
@@ -76,7 +100,7 @@ export function registerLeadHandlers(): void {
     IPC.LEAD_CREATE_FROM_SCRAPE,
     async (_event, { url, forceScrape }: { url: string; forceScrape: boolean }) => {
       if (!url || typeof url !== 'string' || url.trim() === '') {
-        return { success: false, error: "Request must include a non-empty 'url' field." }
+        return { success: false, message: "Request must include a non-empty 'url' field." }
       }
 
       const trimmedUrl = url.trim()
@@ -84,7 +108,7 @@ export function registerLeadHandlers(): void {
       if (!isLinkedInProfileUrl(trimmedUrl)) {
         return {
           success: false,
-          error: "The 'url' field must be a valid LinkedIn profile URL (e.g. https://www.linkedin.com/in/username/).",
+          message: "The 'url' field must be a valid LinkedIn profile URL (e.g. https://www.linkedin.com/in/username/).",
         }
       }
 
@@ -92,7 +116,7 @@ export function registerLeadHandlers(): void {
         return {
           success: false,
           needsLogin: true,
-          error: 'No LinkedIn session found. Please log in to continue.',
+          message: 'No LinkedIn session found. Please log in to continue.',
         }
       }
 
@@ -135,19 +159,19 @@ export function registerLeadHandlers(): void {
               profileData = cached.profileData
             } else {
               const scraped = await runScrape(trimmedUrl)
-              if ('error' in scraped) return scraped
+              if ('error' in scraped) return { success: false as const, message: scraped.error, needsLogin: scraped.needsLogin }
               profileId = scraped.profileId
               profileData = scraped.profileData
             }
           } else {
             const scraped = await runScrape(trimmedUrl)
-            if ('error' in scraped) return scraped
+            if ('error' in scraped) return { success: false as const, message: scraped.error, needsLogin: scraped.needsLogin }
             profileId = scraped.profileId
             profileData = scraped.profileData
           }
         } else {
           const scraped = await runScrape(trimmedUrl)
-          if ('error' in scraped) return scraped
+          if ('error' in scraped) return { success: false as const, message: scraped.error, needsLogin: scraped.needsLogin }
           profileId = scraped.profileId
           profileData = scraped.profileData
         }
@@ -155,7 +179,7 @@ export function registerLeadHandlers(): void {
         // Step 3: Fetch sender config.
         const senderConfig = getSenderConfig()
         if (!senderConfig) {
-          return { success: false, error: 'Sender configuration not found. Please set up your profile in Settings.' }
+          return { success: false, message: 'Sender configuration not found. Please set up your profile in Settings.' }
         }
 
         // Step 4: Summarize the profile.
@@ -166,10 +190,10 @@ export function registerLeadHandlers(): void {
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           log.error('ipc/lead', `LLM call failed: ${message}`)
-          return { success: false, error: `Outreach generation failed: ${message}` }
+          return { success: false, message: `Outreach generation failed: ${message}` }
         }
 
-        const outreach = parseOutreachResponse(rawSummary)
+        const outreach = correctConversationType(parseOutreachResponse(rawSummary), profileData.messages)
 
         // Step 5: Create the lead in 'draft' stage.
         let leadId: number
@@ -179,20 +203,20 @@ export function registerLeadHandlers(): void {
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           log.error('ipc/lead', `Failed to create lead: ${message}`)
-          return { success: false, error: `Failed to create lead: ${message}` }
+          return { success: false, message: `Failed to create lead: ${message}` }
         }
 
         // Step 6: Store the LLM output fields on the lead row.
         try {
           getDb()
             .prepare(
-              `UPDATE leads SET initial_message = ?, role = ?, company = ?, outreach_angle = ?, updated_at = datetime('now') WHERE id = ?`
+              `UPDATE leads SET initial_message = ?, role = ?, company = ?, outreach_angle = ?, conversation_type = ?, strategic_goal = ?, conversation_initiator = ?, updated_at = datetime('now') WHERE id = ?`
             )
-            .run(outreach.message, outreach.role || null, outreach.company || null, outreach.outreachAngle || null, leadId)
+            .run(outreach.message, outreach.role || null, outreach.company || null, outreach.outreachAngle || null, outreach.conversationType || null, outreach.strategicGoal || null, outreach.conversationInitiator || null, leadId)
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           log.error('ipc/lead', `Failed to update lead fields: ${message}`)
-          return { success: false, error: `Failed to update lead fields: ${message}` }
+          return { success: false, message: `Failed to update lead fields: ${message}` }
         }
 
         // Step 7: Append the initial message to the outreach thread.
@@ -202,7 +226,7 @@ export function registerLeadHandlers(): void {
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           log.error('ipc/lead', `Failed to add message to thread: ${message}`)
-          return { success: false, error: `Failed to add message to thread: ${message}` }
+          return { success: false, message: `Failed to add message to thread: ${message}` }
         }
 
         // Step 8: Return success.
@@ -335,17 +359,12 @@ export function registerLeadHandlers(): void {
         const scrapeResult = await runScrape(linkedinUrl)
         if ('error' in scrapeResult) return scrapeResult
 
-        const profileResult = getFullProfileData(linkedinUrl)
-        if (!profileResult) {
-          return { success: false, error: `No profile data found after scrape for URL: ${linkedinUrl}` }
-        }
-
         log.info('ipc/lead', `Profile refreshed for lead ${leadId}`)
-        return {
-          success: true,
-          profile: profileResult.profileData,
-          linkedinMessages: profileResult.profileData.linkedinMessages ?? [],
+        const updated = getLeadWithProfileById(leadId)
+        if (!updated) {
+          return { success: false, error: `Lead ${leadId} not found after profile refresh.` }
         }
+        return updated
       } finally {
         log.clearLogForwarder()
       }
@@ -379,20 +398,14 @@ export function registerLeadHandlers(): void {
         if ('error' in scrapeResult) return scrapeResult
 
         const regenResult = await regenerateLeadDraft(leadId)
-        if (!regenResult.success) return regenResult
-
-        const profileResult = getFullProfileData(linkedinUrl)
-        if (!profileResult) {
-          return { success: false, error: `No profile data found after refresh for URL: ${linkedinUrl}` }
-        }
+        if ('success' in regenResult && regenResult.success === false) return regenResult
 
         log.info('ipc/lead', `Profile and draft refreshed for lead ${leadId}`)
-        return {
-          success: true,
-          lead: regenResult.lead,
-          profile: profileResult.profileData,
-          linkedinMessages: profileResult.profileData.linkedinMessages ?? [],
+        const updated = getLeadWithProfileById(leadId)
+        if (!updated) {
+          return { success: false, error: `Lead ${leadId} not found after refresh.` }
         }
+        return updated
       } finally {
         log.clearLogForwarder()
       }
@@ -439,7 +452,7 @@ export function registerLeadHandlers(): void {
       let generatedMessage: string
       try {
         log.info('ipc/lead', `Generating follow-up #${followUpNumber} for lead ${leadId}`)
-        generatedMessage = await generateFollowUp(profileResult.profileData, senderConfig, priorMessages, followUpNumber)
+        generatedMessage = await generateFollowUp(profileResult.profileData, senderConfig, priorMessages, followUpNumber, lead.conversation_type ?? undefined, lead.strategic_goal ?? undefined, lead.conversation_initiator ?? undefined)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         log.error('ipc/lead', `Follow-up generation failed: ${message}`)
@@ -698,7 +711,7 @@ export function registerLeadHandlers(): void {
       let generatedReply: string
       try {
         log.info('ipc/lead', `Generating reply assist for lead ${leadId}`)
-        generatedReply = await generateReplyAssist(profileResult.profileData, senderConfig, conversationThread)
+        generatedReply = await generateReplyAssist(profileResult.profileData, senderConfig, conversationThread, lead.conversation_type ?? undefined, lead.strategic_goal ?? undefined, lead.conversation_initiator ?? undefined)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         log.error('ipc/lead', `Reply assist generation failed: ${message}`)
@@ -883,7 +896,7 @@ export function registerLeadHandlers(): void {
       let reEngagementMessage: string
       try {
         log.info('ipc/lead', `Generating re-engagement message for lead ${leadId}`)
-        reEngagementMessage = await generateReEngagement(profileResult.profileData, senderConfig, priorThread)
+        reEngagementMessage = await generateReEngagement(profileResult.profileData, senderConfig, priorThread, lead.conversation_type ?? undefined, lead.strategic_goal ?? undefined, lead.conversation_initiator ?? undefined)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         log.error('ipc/lead', `Re-engagement LLM call failed: ${message}`)
@@ -921,7 +934,7 @@ export function registerLeadHandlers(): void {
 async function regenerateLeadDraft(
   leadId: number,
   customInstruction?: string,
-): Promise<{ success: boolean; lead?: { id: number; initial_message: string | null; outreach_angle: string | null }; error?: string }> {
+): Promise<import('../../src/backend/lead-service.js').LeadWithProfile | { success: false; error: string }> {
   const lead = getLeadById(leadId)
   if (!lead) {
     return { success: false, error: `Lead with id ${leadId} not found.` }
@@ -952,13 +965,13 @@ async function regenerateLeadDraft(
     return { success: false, error: `Outreach regeneration failed: ${message}` }
   }
 
-  const outreach = parseOutreachResponse(rawSummary)
+  const outreach = correctConversationType(parseOutreachResponse(rawSummary), profileResult.profileData.messages)
 
   getDb()
     .prepare(
-      `UPDATE leads SET initial_message = ?, outreach_angle = ?, updated_at = datetime('now') WHERE id = ?`
+      `UPDATE leads SET initial_message = ?, outreach_angle = ?, conversation_type = ?, strategic_goal = ?, conversation_initiator = ?, updated_at = datetime('now') WHERE id = ?`
     )
-    .run(outreach.message, outreach.outreachAngle || null, leadId)
+    .run(outreach.message, outreach.outreachAngle || null, outreach.conversationType || null, outreach.strategicGoal || null, outreach.conversationInitiator || null, leadId)
 
   getDb()
     .prepare(
@@ -968,14 +981,11 @@ async function regenerateLeadDraft(
 
   log.info('ipc/lead', `Draft regenerated for lead ${leadId}`)
 
-  return {
-    success: true,
-    lead: {
-      id: leadId,
-      initial_message: outreach.message,
-      outreach_angle: outreach.outreachAngle || null,
-    },
+  const updated = getLeadWithProfileById(leadId)
+  if (!updated) {
+    return { success: false, error: `Lead ${leadId} not found after regeneration.` }
   }
+  return updated
 }
 
 type ScrapeResult =

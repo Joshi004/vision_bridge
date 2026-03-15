@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron'
 import { IPC } from '../../src/shared/ipc-channels'
 import { getSenderConfig, updateSenderConfig } from '../../src/backend/db'
-import { getPromptPreview } from '../../src/backend/summarizer'
+import { getPromptPreview, getPromptPreviewWithReferral } from '../../src/backend/summarizer'
 
 export function registerSenderConfigHandlers(): void {
   ipcMain.handle(IPC.SENDER_CONFIG_GET, () => {
@@ -36,6 +36,17 @@ export function registerSenderConfigHandlers(): void {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       return { error: true, message: `Failed to generate prompt preview: ${message}` }
+    }
+  })
+
+  ipcMain.handle(IPC.PROMPT_PREVIEW_REFERRAL, () => {
+    try {
+      const config = getSenderConfig()
+      const prompt = getPromptPreviewWithReferral(config)
+      return { success: true, prompt }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return { error: true, message: `Failed to generate referral prompt preview: ${message}` }
     }
   })
 }
