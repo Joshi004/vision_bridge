@@ -1,0 +1,730 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+
+interface TrackingPageProps {
+  onOverdueChange?: () => void;
+}
+
+// ── Date / cadence helpers ───────────────────────────────────────────────────
+
+function formatDate(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function formatFollowUpLabel(followUpNumber: number): string {
+  return `Follow-Up ${followUpNumber}`;
+}
+
+function getCadenceStatus(lead: LeadWithProfile): {
+  nextLabel: string;
+  isOverdue: boolean;
+  daysText: string;
+  followUpNumber: number | null;
+} {
+  const now = new Date();
+  const followUpNumber = lead.follow_up_count < lead.max_follow_ups
+    ? lead.follow_up_count + 1
+    : null;
+
+  if (!lead.next_follow_up_at || followUpNumber === null) {
+    return { nextLabel: "All follow-ups sent", isOverdue: false, daysText: "", followUpNumber: null };
+  }
+
+  const dueDate = new Date(lead.next_follow_up_at);
+  const diffMs = dueDate.getTime() - now.getTime();
+  const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+  if (diffDays < 0) {
+    const overdueDays = Math.abs(diffDays);
+    return {
+      nextLabel: `Follow-Up ${followUpNumber}`,
+      isOverdue: true,
+      daysText: `OVERDUE by ${overdueDays} day${overdueDays !== 1 ? "s" : ""} ⚠`,
+      followUpNumber,
+    };
+  }
+
+  if (diffDays === 0) {
+    return {
+      nextLabel: `Follow-Up ${followUpNumber}`,
+      isOverdue: false,
+      daysText: `due today (${formatDate(lead.next_follow_up_at)})`,
+      followUpNumber,
+    };
+  }
+
+  return {
+    nextLabel: `Follow-Up ${followUpNumber}`,
+    isOverdue: false,
+    daysText: `due in ${diffDays} day${diffDays !== 1 ? "s" : ""} (${formatDate(lead.next_follow_up_at)})`,
+    followUpNumber,
+  };
+}
+
+function isOverdue(lead: LeadWithProfile): boolean {
+  if (!lead.next_follow_up_at || lead.follow_up_count >= lead.max_follow_ups) return false;
+  return new Date(lead.next_follow_up_at) < new Date();
+}
+
+// ── Sorting helpers ──────────────────────────────────────────────────────────
+
+type SortBy = "next_action_due" | "initial_sent_date" | "name";
+type FilterBy = "all" | "overdue";
+
+function sortLeads(leads: LeadWithProfile[], sortBy: SortBy): LeadWithProfile[] {
+  const sorted = [...leads];
+  if (sortBy === "next_action_due") {
+    sorted.sort((a, b) => {
+      // Nulls (all FUs exhausted) go last
+      if (!a.next_follow_up_at && !b.next_follow_up_at) return 0;
+      if (!a.next_follow_up_at) return 1;
+      if (!b.next_follow_up_at) return -1;
+      return new Date(a.next_follow_up_at).getTime() - new Date(b.next_follow_up_at).getTime();
+    });
+  } else if (sortBy === "initial_sent_date") {
+    sorted.sort((a, b) => {
+      if (!a.initial_sent_at && !b.initial_sent_at) return 0;
+      if (!a.initial_sent_at) return 1;
+      if (!b.initial_sent_at) return -1;
+      return new Date(b.initial_sent_at).getTime() - new Date(a.initial_sent_at).getTime();
+    });
+  } else {
+    sorted.sort((a, b) => {
+      const nameA = a.profile.name ?? "";
+      const nameB = b.profile.name ?? "";
+      return nameA.localeCompare(nameB);
+    });
+  }
+  return sorted;
+}
+
+function filterLeads(
+  leads: LeadWithProfile[],
+  filterBy: FilterBy,
+  dateFrom: string,
+  dateTo: string,
+): LeadWithProfile[] {
+  let result = leads;
+
+  if (filterBy === "overdue") {
+    result = result.filter(isOverdue);
+  }
+
+  if (dateFrom) {
+    const from = new Date(dateFrom);
+    result = result.filter((l) => l.initial_sent_at && new Date(l.initial_sent_at) >= from);
+  }
+
+  if (dateTo) {
+    // Include the full "to" day
+    const to = new Date(dateTo);
+    to.setHours(23, 59, 59, 999);
+    result = result.filter((l) => l.initial_sent_at && new Date(l.initial_sent_at) <= to);
+  }
+
+  return result;
+}
+
+// ── Main component ───────────────────────────────────────────────────────────
+
+export default function TrackingPage({ onOverdueChange }: TrackingPageProps) {
+  const [leads, setLeads] = useState<LeadWithProfile[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Controls
+  const [sortBy, setSortBy] = useState<SortBy>("next_action_due");
+  const [filterBy, setFilterBy] = useState<FilterBy>("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
+  // Per-card action states
+  const [checkingReplyId, setCheckingReplyId] = useState<number | null>(null);
+  const [markingColdId, setMarkingColdId] = useState<number | null>(null);
+  const [confirmColdId, setConfirmColdId] = useState<number | null>(null);
+  const [cardErrors, setCardErrors] = useState<Record<number, string>>({});
+
+  // Update All state
+  const [checkAllRunning, setCheckAllRunning] = useState(false);
+  const [checkAllResult, setCheckAllResult] = useState<{ checked: number; repliesFound: number; errors: number } | null>(null);
+
+  // Follow-Up Composer
+  const [composerLeadId, setComposerLeadId] = useState<number | null>(null);
+  const [composerGenerating, setComposerGenerating] = useState(false);
+  const [composerData, setComposerData] = useState<{
+    followUpNumber: number;
+    followUpType: string;
+    generatedMessage: string;
+    priorMessages: OutreachThreadMessage[];
+  } | null>(null);
+  const [composerEditedMessage, setComposerEditedMessage] = useState("");
+  const [composerSending, setComposerSending] = useState(false);
+  const [composerError, setComposerError] = useState<string | null>(null);
+
+  // Notification toast
+  const [notification, setNotification] = useState<string | null>(null);
+  const notifTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  function showNotification(msg: string) {
+    if (notifTimerRef.current) clearTimeout(notifTimerRef.current);
+    setNotification(msg);
+    notifTimerRef.current = setTimeout(() => setNotification(null), 3500);
+  }
+
+  function setCardError(id: number, msg: string) {
+    setCardErrors((prev) => ({ ...prev, [id]: msg }));
+  }
+
+  function clearCardError(id: number) {
+    setCardErrors((prev) => {
+      const n = { ...prev };
+      delete n[id];
+      return n;
+    });
+  }
+
+  // ── Data fetching ─────────────────────────────────────────────────────────
+
+  const fetchLeads = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.api.getLeadsByStage("contacted");
+      setLeads(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load tracking data.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchLeads();
+  }, [fetchLeads]);
+
+  // ── Check for replies (single lead) ──────────────────────────────────────
+
+  async function checkReply(id: number) {
+    setCheckingReplyId(id);
+    clearCardError(id);
+    setConfirmColdId(null);
+    try {
+      const result = await window.api.checkForReplies(id);
+      if (!result.success) {
+        setCardError(id, result.error);
+        return;
+      }
+      if (result.hasReply) {
+        setLeads((prev) => prev.filter((l) => l.id !== id));
+        showNotification("Reply detected — moved to Replies");
+        onOverdueChange?.();
+      } else {
+        showNotification("No new replies found.");
+      }
+    } catch (err) {
+      setCardError(id, err instanceof Error ? err.message : "Failed to check for replies.");
+    } finally {
+      setCheckingReplyId(null);
+    }
+  }
+
+  // ── Update All ────────────────────────────────────────────────────────────
+
+  async function checkAllReplies() {
+    setCheckAllRunning(true);
+    setCheckAllResult(null);
+    try {
+      const result = await window.api.checkAllReplies();
+      if (result.success) {
+        setCheckAllResult({ checked: result.checked, repliesFound: result.repliesFound, errors: result.errors });
+        if (result.repliesFound > 0) {
+          await fetchLeads();
+          onOverdueChange?.();
+        }
+      }
+    } catch (err) {
+      showNotification(err instanceof Error ? err.message : "Update All failed.");
+    } finally {
+      setCheckAllRunning(false);
+    }
+  }
+
+  // ── Mark as Cold ──────────────────────────────────────────────────────────
+
+  async function markCold(id: number) {
+    setConfirmColdId(null);
+    setMarkingColdId(id);
+    clearCardError(id);
+    try {
+      const result = await window.api.markCold(id);
+      if (!result.success) {
+        setCardError(id, result.error);
+        return;
+      }
+      setLeads((prev) => prev.filter((l) => l.id !== id));
+      showNotification("Lead marked as Cold.");
+      onOverdueChange?.();
+    } catch (err) {
+      setCardError(id, err instanceof Error ? err.message : "Failed to mark as cold.");
+    } finally {
+      setMarkingColdId(null);
+    }
+  }
+
+  // ── Follow-Up Composer ────────────────────────────────────────────────────
+
+  async function openComposer(lead: LeadWithProfile) {
+    setComposerLeadId(lead.id);
+    setComposerData(null);
+    setComposerEditedMessage("");
+    setComposerError(null);
+    setComposerGenerating(true);
+    try {
+      const result = await window.api.generateFollowUp(lead.id);
+      if (!result.success) {
+        setComposerError(result.error);
+        setComposerGenerating(false);
+        return;
+      }
+      setComposerData({
+        followUpNumber: result.followUpNumber,
+        followUpType: result.followUpType,
+        generatedMessage: result.generatedMessage,
+        priorMessages: result.priorMessages,
+      });
+      setComposerEditedMessage(result.generatedMessage);
+    } catch (err) {
+      setComposerError(err instanceof Error ? err.message : "Failed to generate follow-up.");
+    } finally {
+      setComposerGenerating(false);
+    }
+  }
+
+  function closeComposer() {
+    setComposerLeadId(null);
+    setComposerData(null);
+    setComposerEditedMessage("");
+    setComposerError(null);
+    setComposerGenerating(false);
+    setComposerSending(false);
+  }
+
+  async function sendFollowUp() {
+    if (!composerLeadId || !composerEditedMessage.trim()) return;
+    setComposerSending(true);
+    setComposerError(null);
+    try {
+      const result = await window.api.sendFollowUp(composerLeadId, composerEditedMessage.trim());
+      if (!result.success) {
+        setComposerError(result.error);
+        return;
+      }
+      closeComposer();
+      await fetchLeads();
+      showNotification("Follow-up sent successfully.");
+      onOverdueChange?.();
+    } catch (err) {
+      setComposerError(err instanceof Error ? err.message : "Failed to send follow-up.");
+    } finally {
+      setComposerSending(false);
+    }
+  }
+
+  // ── Derived display list ──────────────────────────────────────────────────
+
+  const composerLead = leads.find((l) => l.id === composerLeadId) ?? null;
+  const displayedLeads = filterLeads(sortLeads(leads, sortBy), filterBy, dateFrom, dateTo);
+
+  // ── Render: loading / error ───────────────────────────────────────────────
+
+  if (loading) {
+    return (
+      <div className="tracking-container">
+        <div className="drafts-loading">
+          <span className="bulk-spinner" aria-hidden="true" />
+          Loading contacts…
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="tracking-container">
+        <div className="drafts-error">
+          <p>{error}</p>
+          <button className="btn btn-secondary" onClick={fetchLeads}>
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  return (
+    <div className="tracking-container">
+      {/* Page header */}
+      <div className="tracking-header">
+        <div className="tracking-header__top">
+          <h2 className="tracking-title">
+            Tracking
+            {leads.length > 0 && (
+              <span className="drafts-count-badge">{leads.length}</span>
+            )}
+          </h2>
+          <div className="tracking-header__actions">
+            {checkAllRunning ? (
+              <span className="drafts-refresh-all-progress">
+                <span className="bulk-spinner-inline" aria-hidden="true" />
+                Checking all…
+              </span>
+            ) : checkAllResult ? (
+              <span className="tracking-check-all-result">
+                Checked {checkAllResult.checked} · {checkAllResult.repliesFound} replies · {checkAllResult.errors} errors
+              </span>
+            ) : null}
+            <button
+              className="drafts-refresh-all-btn"
+              onClick={checkAllReplies}
+              disabled={checkAllRunning || leads.length === 0}
+              title="Check all contacted leads for new replies"
+            >
+              Update All ↻
+            </button>
+          </div>
+        </div>
+
+        {/* Controls bar */}
+        <div className="tracking-controls">
+          <select
+            className="filter-select"
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as SortBy)}
+          >
+            <option value="next_action_due">Sort: Next action due</option>
+            <option value="initial_sent_date">Sort: Initial sent date</option>
+            <option value="name">Sort: Name</option>
+          </select>
+
+          <select
+            className="filter-select"
+            value={filterBy}
+            onChange={(e) => setFilterBy(e.target.value as FilterBy)}
+          >
+            <option value="all">Filter: All</option>
+            <option value="overdue">Filter: Overdue only</option>
+          </select>
+
+          <div className="tracking-date-range">
+            <label className="tracking-date-label">From</label>
+            <input
+              type="date"
+              className="tracking-date-input"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+            />
+            <label className="tracking-date-label">To</label>
+            <input
+              type="date"
+              className="tracking-date-input"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Empty state */}
+      {leads.length === 0 && (
+        <div className="drafts-empty">
+          <p>No contacted leads yet.</p>
+          <p className="drafts-empty__hint">
+            Send initial messages from the Drafts page to start tracking follow-ups.
+          </p>
+        </div>
+      )}
+
+      {/* Filtered-to-empty state */}
+      {leads.length > 0 && displayedLeads.length === 0 && (
+        <div className="drafts-empty">
+          <p>No leads match the current filter.</p>
+          <p className="drafts-empty__hint">
+            Try changing the filter or date range.
+          </p>
+        </div>
+      )}
+
+      {/* Card list */}
+      <div className="drafts-card-list">
+        {displayedLeads.map((lead) => {
+          const id = lead.id;
+          const name = lead.profile.name ?? "LinkedIn Profile";
+          const cardError = cardErrors[id];
+          const isCheckingReply = checkingReplyId === id;
+          const isMarkingCold = markingColdId === id;
+          const isBusy = isCheckingReply || isMarkingCold || checkAllRunning;
+          const cadence = getCadenceStatus(lead);
+
+          const lastSentLabel = lead.last_contacted_at
+            ? formatDate(lead.last_contacted_at)
+            : lead.initial_sent_at
+            ? formatDate(lead.initial_sent_at)
+            : "—";
+
+          return (
+            <div key={id} className="drafts-card tracking-card">
+              {/* Card header */}
+              <div className="drafts-card__header" style={{ cursor: "default" }}>
+                <div className="drafts-card__identity">
+                  <a
+                    href={lead.profile.linkedin_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="drafts-card__name person-link"
+                  >
+                    {name}
+                  </a>
+                  {(lead.role || lead.company) && (
+                    <span className="drafts-card__role">
+                      {[lead.role, lead.company].filter(Boolean).join(" · ")}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Cadence status block */}
+              <div className="tracking-cadence">
+                <div className="tracking-cadence__row">
+                  <span className="tracking-cadence__label">Initial sent:</span>
+                  <span className="tracking-cadence__value">{formatDate(lead.initial_sent_at)}</span>
+                </div>
+                <div className="tracking-cadence__row">
+                  <span className="tracking-cadence__label">Follow-ups:</span>
+                  <span className="tracking-cadence__value">
+                    {lead.follow_up_count} / {lead.max_follow_ups} sent
+                  </span>
+                </div>
+                <div className="tracking-cadence__row">
+                  <span className="tracking-cadence__label">Next:</span>
+                  {cadence.followUpNumber ? (
+                    <span className={`tracking-cadence__value${cadence.isOverdue ? " tracking-cadence__value--overdue" : ""}`}>
+                      {cadence.nextLabel} — {cadence.daysText}
+                    </span>
+                  ) : (
+                    <span className="tracking-cadence__value tracking-cadence__value--exhausted">
+                      All follow-ups sent
+                    </span>
+                  )}
+                </div>
+                <div className="tracking-cadence__row">
+                  <span className="tracking-cadence__label">Last sent:</span>
+                  <span className="tracking-cadence__value">{lastSentLabel}</span>
+                </div>
+              </div>
+
+              {/* Inline cold confirmation */}
+              {confirmColdId === id && (
+                <div className="drafts-confirm">
+                  <span className="drafts-confirm__text">
+                    Mark {name} as Cold? This will move them out of Tracking.
+                  </span>
+                  <div className="drafts-confirm__actions">
+                    <button
+                      className="btn btn-delete btn--sm"
+                      onClick={() => markCold(id)}
+                    >
+                      Confirm
+                    </button>
+                    <button
+                      className="btn btn-secondary btn--sm"
+                      onClick={() => setConfirmColdId(null)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Action buttons */}
+              <div className="drafts-card__actions tracking-card__actions">
+                <button
+                  className="btn btn-send"
+                  onClick={() => {
+                    setConfirmColdId(null);
+                    openComposer(lead);
+                  }}
+                  disabled={isBusy || cadence.followUpNumber === null}
+                  title={cadence.followUpNumber === null ? "All follow-ups have been sent" : undefined}
+                >
+                  {formatFollowUpLabel(cadence.followUpNumber ?? lead.max_follow_ups)}
+                </button>
+
+                <button
+                  className="btn btn-delete"
+                  onClick={() => {
+                    setConfirmColdId(id === confirmColdId ? null : id);
+                  }}
+                  disabled={isBusy}
+                >
+                  {isMarkingCold ? "Marking…" : "Mark as Cold"}
+                </button>
+
+                <button
+                  className="btn btn-refresh tracking-card__update-btn"
+                  onClick={() => checkReply(id)}
+                  disabled={isBusy}
+                >
+                  {isCheckingReply ? (
+                    <>
+                      <span className="bulk-spinner-inline" aria-hidden="true" />
+                      Checking…
+                    </>
+                  ) : (
+                    "Update ↻"
+                  )}
+                </button>
+              </div>
+
+              {/* Per-card inline error */}
+              {cardError && (
+                <div className="drafts-card__error">{cardError}</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Follow-Up Composer modal */}
+      {composerLeadId !== null && (
+        <div className="fu-modal-backdrop" onClick={(e) => { if (e.target === e.currentTarget) closeComposer(); }}>
+          <div className="fu-modal">
+            <div className="fu-modal__header">
+              <h3 className="fu-modal__title">
+                {composerGenerating
+                  ? "Generating…"
+                  : composerData
+                  ? `${formatFollowUpLabel(composerData.followUpNumber)} for ${composerLead?.profile.name ?? "Contact"}`
+                  : "Follow-Up Composer"}
+              </h3>
+              <button
+                className="fu-modal__close"
+                onClick={closeComposer}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {composerGenerating && (
+              <div className="fu-modal__generating">
+                <span className="bulk-spinner" aria-hidden="true" />
+                Generating follow-up…
+              </div>
+            )}
+
+            {!composerGenerating && composerError && (
+              <div className="fu-modal__error">
+                <p>{composerError}</p>
+                <button className="btn btn-secondary btn--sm" onClick={closeComposer}>
+                  Close
+                </button>
+              </div>
+            )}
+
+            {!composerGenerating && composerData && (
+              <>
+                {/* Prior messages */}
+                <div className="fu-modal__prior-section">
+                  <span className="fu-modal__section-label">Previous messages</span>
+                  <div className="fu-modal__prior-list">
+                    {composerData.priorMessages.map((msg) => {
+                      const isSelf = msg.sender === "self";
+                      return (
+                        <div
+                          key={msg.id}
+                          className={`fu-prior-msg fu-prior-msg--${isSelf ? "self" : "them"}`}
+                        >
+                          <div className="fu-prior-msg__meta">
+                            <span className="fu-prior-msg__sender">
+                              {isSelf ? "You" : "Them"}
+                            </span>
+                            <span className="fu-prior-msg__type">
+                              {msg.message_type === "initial"
+                                ? "Initial"
+                                : msg.message_type.startsWith("follow_up_")
+                                ? `FU${msg.message_type.slice(-1)}`
+                                : msg.message_type === "reply_received"
+                                ? "Reply"
+                                : msg.message_type}
+                            </span>
+                            {msg.sent_at && (
+                              <span className="fu-prior-msg__date">{formatDate(msg.sent_at)}</span>
+                            )}
+                          </div>
+                          <p className="fu-prior-msg__text">{msg.message}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Editable textarea */}
+                <div className="fu-modal__composer-section">
+                  <span className="fu-modal__section-label">Suggested follow-up</span>
+                  <textarea
+                    className="draft-textarea fu-modal__textarea"
+                    value={composerEditedMessage}
+                    onChange={(e) => setComposerEditedMessage(e.target.value)}
+                    disabled={composerSending}
+                    rows={8}
+                  />
+                </div>
+
+                {composerError && (
+                  <div className="fu-modal__send-error">{composerError}</div>
+                )}
+
+                {/* Actions */}
+                <div className="fu-modal__actions">
+                  <button
+                    className="btn btn-secondary"
+                    onClick={closeComposer}
+                    disabled={composerSending}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="btn btn-send"
+                    onClick={sendFollowUp}
+                    disabled={composerSending || !composerEditedMessage.trim()}
+                  >
+                    {composerSending ? (
+                      <>
+                        <span className="bulk-spinner-inline" aria-hidden="true" />
+                        Sending…
+                      </>
+                    ) : (
+                      "Send ▸"
+                    )}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Toast notification */}
+      {notification && (
+        <div className="tracking-toast" role="status">
+          {notification}
+        </div>
+      )}
+    </div>
+  );
+}

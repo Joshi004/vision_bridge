@@ -1,0 +1,32 @@
+appId: com.vision01.electron
+productName: Vision-01
+directories:
+  buildResources: build
+  output: dist
+
+asar: true
+asarUnpack:
+  - "node_modules/better-sqlite3/**"
+
+files:
+  - "out/**"
+  - "node_modules/**"
+  - "!node_modules/puppeteer/.local-chromium/**"
+  - "!node_modules/puppeteer-core/.local-chromium/**"
+
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.productivity
+
+win:
+  target:
+    - nsis
+
+linux:
+  target:
+    - AppImage
+
+extraMetadata:
+  main: out/main/main.js
