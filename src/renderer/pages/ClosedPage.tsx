@@ -5,6 +5,26 @@ type FilterType = "all" | "converted" | "cold";
 
 // ── Date helpers ─────────────────────────────────────────────────────────────
 
+const PERSONA_LABELS: Record<string, string> = {
+  c_level: "C-Level",
+  management: "Management",
+  top_engineer: "Top Engineer",
+  mid_engineer: "Mid Engineer",
+  junior_engineer: "Junior",
+  recruiter: "Recruiter",
+  procurement: "Procurement",
+  other: "Other",
+};
+
+const STATE_LABELS: Record<string, string> = {
+  inbound_referral: "Inbound Referral",
+  outbound_referral: "Outbound Referral",
+  inbound_recruitment: "Inbound Recruitment",
+  outbound_recruitment: "Outbound Recruitment",
+  inbound_other: "Inbound",
+  outbound_other: "Outbound",
+};
+
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -234,6 +254,16 @@ export default function ClosedPage() {
                       {role !== "—" && company !== "—" && " · "}
                       {company !== "—" && company}
                     </span>
+                    {lead.persona && (
+                      <span className={`meta-tag persona-${lead.persona}`}>
+                        {PERSONA_LABELS[lead.persona] ?? lead.persona}
+                      </span>
+                    )}
+                    {lead.message_state && (
+                      <span className="meta-tag state">
+                        {STATE_LABELS[lead.message_state] ?? lead.message_state}
+                      </span>
+                    )}
                   </div>
 
                   {/* Outcome badge */}

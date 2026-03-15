@@ -32,6 +32,8 @@ type SingleUrlResult =
         role: string
         company: string
         seniority: string
+        persona: string
+        messageState: string
         conversationInitiator: string
         conversationType: string
         conversationStatus: string
@@ -79,6 +81,8 @@ async function processSingleUrl(trimmedUrl: string, forceScrape: boolean, sender
             role: outreach.role,
             company: outreach.company,
             seniority: outreach.seniority,
+            persona: outreach.persona,
+            messageState: outreach.messageState,
             conversationInitiator: outreach.conversationInitiator,
             conversationType: outreach.conversationType,
             conversationStatus: outreach.conversationStatus,
@@ -150,6 +154,8 @@ async function processSingleUrl(trimmedUrl: string, forceScrape: boolean, sender
       role: outreach.role,
       company: outreach.company,
       seniority: outreach.seniority,
+      persona: outreach.persona,
+      messageState: outreach.messageState,
       conversationInitiator: outreach.conversationInitiator,
       conversationType: outreach.conversationType,
       conversationStatus: outreach.conversationStatus,

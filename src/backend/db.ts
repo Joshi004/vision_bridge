@@ -213,6 +213,8 @@ export function initDatabase(): void {
     "ALTER TABLE leads ADD COLUMN conversation_type TEXT",
     "ALTER TABLE leads ADD COLUMN strategic_goal TEXT",
     "ALTER TABLE leads ADD COLUMN conversation_initiator TEXT",
+    "ALTER TABLE leads ADD COLUMN persona TEXT",
+    "ALTER TABLE leads ADD COLUMN message_state TEXT",
   ]) {
     try {
       db.prepare(sql).run();

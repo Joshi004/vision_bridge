@@ -23,6 +23,8 @@ declare global {
     role: string
     company: string
     seniority: string
+    persona: string
+    messageState: string
     conversationInitiator: string
     conversationType: string
     conversationStatus: 'new' | 'continuation'
@@ -119,6 +121,9 @@ declare global {
     outreach_angle: string | null
     role: string | null
     company: string | null
+    persona: string | null
+    message_state: string | null
+    conversation_type: string | null
     follow_up_count: number
     max_follow_ups: number
     initial_sent_at: string | null

@@ -210,9 +210,9 @@ export function registerLeadHandlers(): void {
         try {
           getDb()
             .prepare(
-              `UPDATE leads SET initial_message = ?, role = ?, company = ?, outreach_angle = ?, conversation_type = ?, strategic_goal = ?, conversation_initiator = ?, updated_at = datetime('now') WHERE id = ?`
+              `UPDATE leads SET initial_message = ?, role = ?, company = ?, outreach_angle = ?, conversation_type = ?, strategic_goal = ?, conversation_initiator = ?, persona = ?, message_state = ?, updated_at = datetime('now') WHERE id = ?`
             )
-            .run(outreach.message, outreach.role || null, outreach.company || null, outreach.outreachAngle || null, outreach.conversationType || null, outreach.strategicGoal || null, outreach.conversationInitiator || null, leadId)
+            .run(outreach.message, outreach.role || null, outreach.company || null, outreach.outreachAngle || null, outreach.conversationType || null, outreach.strategicGoal || null, outreach.conversationInitiator || null, outreach.persona || null, outreach.messageState || null, leadId)
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           log.error('ipc/lead', `Failed to update lead fields: ${message}`)
@@ -452,7 +452,7 @@ export function registerLeadHandlers(): void {
       let generatedMessage: string
       try {
         log.info('ipc/lead', `Generating follow-up #${followUpNumber} for lead ${leadId}`)
-        generatedMessage = await generateFollowUp(profileResult.profileData, senderConfig, priorMessages, followUpNumber, lead.conversation_type ?? undefined, lead.strategic_goal ?? undefined, lead.conversation_initiator ?? undefined)
+        generatedMessage = await generateFollowUp(profileResult.profileData, senderConfig, priorMessages, followUpNumber, lead.conversation_type ?? undefined, lead.strategic_goal ?? undefined, lead.conversation_initiator ?? undefined, lead.persona ?? undefined)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         log.error('ipc/lead', `Follow-up generation failed: ${message}`)
@@ -711,7 +711,7 @@ export function registerLeadHandlers(): void {
       let generatedReply: string
       try {
         log.info('ipc/lead', `Generating reply assist for lead ${leadId}`)
-        generatedReply = await generateReplyAssist(profileResult.profileData, senderConfig, conversationThread, lead.conversation_type ?? undefined, lead.strategic_goal ?? undefined, lead.conversation_initiator ?? undefined)
+        generatedReply = await generateReplyAssist(profileResult.profileData, senderConfig, conversationThread, lead.conversation_type ?? undefined, lead.strategic_goal ?? undefined, lead.conversation_initiator ?? undefined, lead.persona ?? undefined)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         log.error('ipc/lead', `Reply assist generation failed: ${message}`)
@@ -896,7 +896,7 @@ export function registerLeadHandlers(): void {
       let reEngagementMessage: string
       try {
         log.info('ipc/lead', `Generating re-engagement message for lead ${leadId}`)
-        reEngagementMessage = await generateReEngagement(profileResult.profileData, senderConfig, priorThread, lead.conversation_type ?? undefined, lead.strategic_goal ?? undefined, lead.conversation_initiator ?? undefined)
+        reEngagementMessage = await generateReEngagement(profileResult.profileData, senderConfig, priorThread, lead.conversation_type ?? undefined, lead.strategic_goal ?? undefined, lead.conversation_initiator ?? undefined, lead.persona ?? undefined)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         log.error('ipc/lead', `Re-engagement LLM call failed: ${message}`)
@@ -969,9 +969,9 @@ async function regenerateLeadDraft(
 
   getDb()
     .prepare(
-      `UPDATE leads SET initial_message = ?, outreach_angle = ?, conversation_type = ?, strategic_goal = ?, conversation_initiator = ?, updated_at = datetime('now') WHERE id = ?`
+      `UPDATE leads SET initial_message = ?, outreach_angle = ?, conversation_type = ?, strategic_goal = ?, conversation_initiator = ?, persona = ?, message_state = ?, updated_at = datetime('now') WHERE id = ?`
     )
-    .run(outreach.message, outreach.outreachAngle || null, outreach.conversationType || null, outreach.strategicGoal || null, outreach.conversationInitiator || null, leadId)
+    .run(outreach.message, outreach.outreachAngle || null, outreach.conversationType || null, outreach.strategicGoal || null, outreach.conversationInitiator || null, outreach.persona || null, outreach.messageState || null, leadId)
 
   getDb()
     .prepare(

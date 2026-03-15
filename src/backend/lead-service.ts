@@ -11,6 +11,8 @@ export interface LeadRow {
   conversation_type: string | null;
   strategic_goal: string | null;
   conversation_initiator: string | null;
+  persona: string | null;
+  message_state: string | null;
   follow_up_count: number;
   max_follow_ups: number;
   initial_sent_at: string | null;
@@ -149,6 +151,9 @@ export interface LeadWithProfile {
   outreach_angle: string | null;
   role: string | null;
   company: string | null;
+  conversation_type: string | null;
+  persona: string | null;
+  message_state: string | null;
   follow_up_count: number;
   max_follow_ups: number;
   initial_sent_at: string | null;
@@ -180,6 +185,9 @@ export function getLeadsWithProfileByStage(stage: string): LeadWithProfile[] {
     outreach_angle: string | null;
     role: string | null;
     company: string | null;
+    conversation_type: string | null;
+    persona: string | null;
+    message_state: string | null;
     follow_up_count: number;
     max_follow_ups: number;
     initial_sent_at: string | null;
@@ -197,7 +205,8 @@ export function getLeadsWithProfileByStage(stage: string): LeadWithProfile[] {
     .prepare<string[], LeadJoinRow>(`
       SELECT
         l.id, l.profile_id, l.stage, l.initial_message, l.outreach_angle,
-        l.role, l.company, l.follow_up_count, l.max_follow_ups,
+        l.role, l.company, l.conversation_type, l.persona, l.message_state,
+        l.follow_up_count, l.max_follow_ups,
         l.initial_sent_at, l.last_contacted_at, l.next_follow_up_at,
         l.closed_at, l.created_at, l.updated_at,
         p.name, p.headline, p.linkedin_url
@@ -244,6 +253,9 @@ export function getLeadsWithProfileByStage(stage: string): LeadWithProfile[] {
     outreach_angle: r.outreach_angle,
     role: r.role,
     company: r.company,
+    conversation_type: r.conversation_type,
+    persona: r.persona,
+    message_state: r.message_state,
     follow_up_count: r.follow_up_count,
     max_follow_ups: r.max_follow_ups,
     initial_sent_at: r.initial_sent_at,
@@ -272,6 +284,9 @@ export function getLeadWithProfileById(leadId: number): LeadWithProfile | undefi
     outreach_angle: string | null;
     role: string | null;
     company: string | null;
+    conversation_type: string | null;
+    persona: string | null;
+    message_state: string | null;
     follow_up_count: number;
     max_follow_ups: number;
     initial_sent_at: string | null;
@@ -289,7 +304,8 @@ export function getLeadWithProfileById(leadId: number): LeadWithProfile | undefi
     .prepare<number[], LeadJoinRow>(`
       SELECT
         l.id, l.profile_id, l.stage, l.initial_message, l.outreach_angle,
-        l.role, l.company, l.follow_up_count, l.max_follow_ups,
+        l.role, l.company, l.conversation_type, l.persona, l.message_state,
+        l.follow_up_count, l.max_follow_ups,
         l.initial_sent_at, l.last_contacted_at, l.next_follow_up_at,
         l.closed_at, l.created_at, l.updated_at,
         p.name, p.headline, p.linkedin_url
@@ -325,6 +341,9 @@ export function getLeadWithProfileById(leadId: number): LeadWithProfile | undefi
     outreach_angle: row.outreach_angle,
     role: row.role,
     company: row.company,
+    conversation_type: row.conversation_type,
+    persona: row.persona,
+    message_state: row.message_state,
     follow_up_count: row.follow_up_count,
     max_follow_ups: row.max_follow_ups,
     initial_sent_at: row.initial_sent_at,

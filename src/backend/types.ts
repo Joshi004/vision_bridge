@@ -49,12 +49,33 @@ export interface SummarizedProfile extends ProfileData {
   summary: string;
 }
 
+export type Persona =
+  | "c_level"
+  | "management"
+  | "top_engineer"
+  | "mid_engineer"
+  | "junior_engineer"
+  | "recruiter"
+  | "procurement"
+  | "other";
+
+export type MessageState =
+  | "inbound_referral"
+  | "outbound_referral"
+  | "inbound_recruitment"
+  | "outbound_recruitment"
+  | "inbound_other"
+  | "outbound_other";
+
 export interface OutreachResult {
   role: string;
   company: string;
   seniority: string;
+  persona: Persona;
   conversationInitiator: "self" | "them" | "none";
   conversationType: string;
+  messageState: string;
+  subState: string;
   conversationStatus: "new" | "continuation";
   strategicGoal: string;
   leverageValue: string;

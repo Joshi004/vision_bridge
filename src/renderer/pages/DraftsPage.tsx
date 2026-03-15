@@ -6,6 +6,26 @@ interface EditEntry {
   original: string;
 }
 
+const PERSONA_LABELS: Record<string, string> = {
+  c_level: "C-Level",
+  management: "Management",
+  top_engineer: "Top Engineer",
+  mid_engineer: "Mid Engineer",
+  junior_engineer: "Junior",
+  recruiter: "Recruiter",
+  procurement: "Procurement",
+  other: "Other",
+};
+
+const STATE_LABELS: Record<string, string> = {
+  inbound_referral: "Inbound Referral",
+  outbound_referral: "Outbound Referral",
+  inbound_recruitment: "Inbound Recruitment",
+  outbound_recruitment: "Outbound Recruitment",
+  inbound_other: "Inbound",
+  outbound_other: "Outbound",
+};
+
 export default function DraftsPage() {
   const [leads, setLeads] = useState<LeadWithProfile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -34,6 +54,17 @@ export default function DraftsPage() {
 
   // Which cards have "More options" expanded
   const [moreOpenIds, setMoreOpenIds] = useState<Set<number>>(new Set());
+
+  // Which message bubbles are expanded (key: "{leadId}-{msgIndex}")
+  const [expandedMsgs, setExpandedMsgs] = useState<Set<string>>(new Set());
+
+  const toggleMsg = (key: string) => {
+    setExpandedMsgs((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  };
 
   // Per-card custom instruction text
   const [customInstructions, setCustomInstructions] = useState<Record<number, string>>({});
@@ -443,6 +474,16 @@ export default function DraftsPage() {
                       {[lead.role, lead.company].filter(Boolean).join(" · ")}
                     </span>
                   )}
+                  {lead.persona && (
+                    <span className={`meta-tag persona-${lead.persona}`}>
+                      {PERSONA_LABELS[lead.persona] ?? lead.persona}
+                    </span>
+                  )}
+                  {lead.message_state && (
+                    <span className="meta-tag state">
+                      {STATE_LABELS[lead.message_state] ?? lead.message_state}
+                    </span>
+                  )}
                 </div>
                 <button
                   className={`drafts-card__refresh-btn${isRefreshingProfile ? " drafts-card__refresh-btn--spinning" : ""}`}
@@ -462,15 +503,21 @@ export default function DraftsPage() {
                 ) : (
                   lastTwoMessages.map((msg, i) => {
                     const isSelf = msg.sender === "self";
+                    const msgKey = `${id}-${i}`;
+                    const isExpanded = expandedMsgs.has(msgKey);
                     return (
                       <div
                         key={i}
                         className={`msg-bubble msg-bubble--${isSelf ? "self" : "them"}`}
+                        onClick={() => toggleMsg(msgKey)}
+                        title={isExpanded ? "Click to collapse" : "Click to expand"}
                       >
                         <span className="msg-bubble__label">
                           {isSelf ? "You" : "Them"}
                         </span>
-                        <span className="msg-bubble__text">{msg.content}</span>
+                        <span className={`msg-bubble__text${isExpanded ? " msg-bubble__text--expanded" : ""}`}>
+                          {msg.content}
+                        </span>
                       </div>
                     );
                   })
