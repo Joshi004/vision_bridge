@@ -1,5 +1,5 @@
-appId: com.vision01.electron
-productName: Vision-01
+appId: com.visionbridge.electron
+productName: VisionBridge
 directories:
   buildResources: build
   output: dist

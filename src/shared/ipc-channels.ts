@@ -8,6 +8,7 @@ export const IPC = {
   OPEN_LOGS_FOLDER: "logs:open-folder",
   SENDER_CONFIG_GET: "sender-config:get",
   SENDER_CONFIG_SAVE: "sender-config:save",
+  PROMPT_PREVIEW: "sender-config:prompt-preview",
   LEAD_CHECK_DUPLICATE: "lead:check-duplicate",
   LEAD_CREATE_FROM_SCRAPE: "lead:create-from-scrape",
   LEAD_LIST: "lead:list",
