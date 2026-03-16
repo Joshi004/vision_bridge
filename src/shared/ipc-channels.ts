@@ -15,6 +15,7 @@ export const IPC = {
   LEAD_LIST: "lead:list",
   LEAD_UPDATE_DRAFT: "lead:update-draft",
   LEAD_DELETE: "lead:delete",
+  LEAD_BULK_DELETE: "lead:bulk-delete",
   LEAD_REGENERATE: "lead:regenerate",
   LEAD_REGENERATE_WITH_INSTRUCTION: "lead:regenerate-with-instruction",
   LEAD_SEND: "lead:send",
@@ -31,6 +32,12 @@ export const IPC = {
   LEAD_MARK_CONVERTED: "lead:mark-converted",
   LEAD_UPDATE_REPLIED: "lead:update-replied",
   LEAD_REOPEN: "lead:reopen",
+  QUEUE_CANCEL: "queue:cancel",
+  QUEUE_STATUS: "queue:status",
+  QUEUE_PROGRESS: "queue:progress",
+  QUEUE_DRAINED: "queue:drained",
+  QUEUE_RETRY: "queue:retry",
+  QUEUE_SESSION_EXPIRED: "queue:session-expired",
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];

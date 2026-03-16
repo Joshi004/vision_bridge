@@ -385,6 +385,16 @@ export function deleteLead(leadId: number): void {
 }
 
 /**
+ * Delete multiple leads by id in a single statement.
+ */
+export function deleteLeads(ids: number[]): void {
+  if (ids.length === 0) return;
+  const db = getDb();
+  const placeholders = ids.map(() => "?").join(", ");
+  db.prepare(`DELETE FROM leads WHERE id IN (${placeholders})`).run(...ids);
+}
+
+/**
  * Fetch the full outreach thread for a lead in chronological order.
  */
 export function getConversationThread(leadId: number): OutreachThreadRow[] {

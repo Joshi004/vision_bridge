@@ -197,16 +197,39 @@ declare global {
 
   interface BulkScrapeSuccess {
     success: true
-    total: number
-    succeeded: number
-    failed: number
-    cancelled: number
+    enqueued: number
     invalidUrls: string[]
   }
 
   type BulkScrapeResult = BulkScrapeSuccess | (ErrorResult & { needsLogin?: boolean })
 
   type BulkProgressHandler = (event: unknown, data: BulkProgressEvent) => void
+
+  interface QueueItemStatus {
+    id: string
+    queue: 'data' | 'action'
+    type: string
+    payload: Record<string, unknown>
+    status: 'queued' | 'active' | 'completed' | 'failed' | 'cancelled'
+    result?: unknown
+    error?: string
+    createdAt: number
+    completedAt?: number
+  }
+
+  interface QueueStatusResponse {
+    dataQueue: QueueItemStatus[]
+    actionQueue: QueueItemStatus[]
+  }
+
+  interface QueueDrainedEvent {
+    queue: 'data' | 'action'
+    completed: number
+    failed: number
+  }
+
+  type QueueProgressHandler = (event: unknown, data: QueueItemStatus) => void
+  type QueueDrainedHandler = (event: unknown, data: QueueDrainedEvent) => void
 
   interface Window {
     api: {
@@ -228,7 +251,11 @@ declare global {
       getLeadsByStage(stage: string): Promise<LeadWithProfile[]>
       updateLeadDraft(leadId: number, message: string): Promise<{ success: true }>
       deleteLead(leadId: number): Promise<{ success: true }>
-      sendLead(leadId: number, message?: string): Promise<{ success: true } | { success: false; error: string; needsLogin?: boolean }>
+      deleteLeads(ids: number[]): Promise<{ success: true } | { success: false; error: string }>
+      sendLead(leadId: number, message?: string): Promise<
+        | { queued: true; jobId: string }
+        | { success: false; error: string; needsLogin?: boolean }
+      >
       regenerateDraft(leadId: number): Promise<LeadWithProfile | { success: false; error: string }>
       regenerateDraftWithInstruction(leadId: number, instruction: string): Promise<LeadWithProfile | { success: false; error: string }>
       refreshLeadProfile(leadId: number): Promise<LeadWithProfile | { success: false; error: string }>
@@ -237,9 +264,9 @@ declare global {
         | { success: true; followUpNumber: number; followUpType: string; generatedMessage: string; priorMessages: OutreachThreadMessage[] }
         | { success: false; error: string }
       >
-      sendFollowUp(leadId: number, message: string): Promise<{ success: true } | { success: false; error: string; needsLogin?: boolean }>
+      sendFollowUp(leadId: number, message: string): Promise<{ queued: true; jobId: string } | { success: false; error: string; needsLogin?: boolean }>
       checkForReplies(leadId: number): Promise<{ success: true; hasReply: boolean; replyContent?: { sender: string; text: string }[] } | { success: false; error: string }>
-      checkAllReplies(): Promise<{ success: true; checked: number; repliesFound: number; errors: number }>
+      checkAllReplies(): Promise<{ queued: true; count: number } | { success: false; error: string }>
       markCold(leadId: number): Promise<{ success: true } | { success: false; error: string }>
       getOverdueCount(): Promise<{ success: true; count: number }>
       generateReply(leadId: number): Promise<
@@ -247,7 +274,7 @@ declare global {
         | { success: false; error: string }
       >
       sendReply(leadId: number, message: string): Promise<
-        { success: true } | { success: false; error: string; needsLogin?: boolean }
+        { queued: true; jobId: string } | { success: false; error: string; needsLogin?: boolean }
       >
       markConverted(leadId: number): Promise<
         { success: true } | { success: false; error: string }
@@ -262,6 +289,18 @@ declare global {
         | { newMessagesFound: boolean; newMessageCount: number; conversationThread: OutreachThreadMessage[] }
         | { success: false; error: string }
       >
+      queue: {
+        getStatus(): Promise<QueueStatusResponse>
+        cancel(jobId: string): Promise<{ success: boolean }>
+        cancelAll(queueName?: 'data' | 'action'): Promise<{ success: true }>
+        retry(jobId: string): Promise<{ success: boolean; newJobId?: string; error?: string }>
+        onProgress(callback: (data: QueueItemStatus) => void): QueueProgressHandler
+        removeProgressListener(handler: QueueProgressHandler): void
+        onDrained(callback: (data: QueueDrainedEvent) => void): QueueDrainedHandler
+        removeDrainedListener(handler: QueueDrainedHandler): void
+        onSessionExpired(callback: () => void): (event: unknown) => void
+        removeSessionExpiredListener(handler: (event: unknown) => void): void
+      }
     }
   }
 }

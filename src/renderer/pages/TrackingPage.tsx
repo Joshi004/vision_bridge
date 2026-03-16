@@ -4,6 +4,12 @@ interface TrackingPageProps {
   onOverdueChange?: () => void;
 }
 
+interface CardQueueInfo {
+  jobId: string;
+  status: 'queued' | 'active' | 'failed';
+  error?: string;
+}
+
 // ── Date / cadence helpers ───────────────────────────────────────────────────
 
 function formatDate(iso: string | null): string {
@@ -182,17 +188,28 @@ export default function TrackingPage({ onOverdueChange }: TrackingPageProps) {
   const [composerSending, setComposerSending] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
 
+  // Queue state for follow-up sends
+  const [followUpQueueState, setFollowUpQueueState] = useState<Record<number, CardQueueInfo>>({});
+
+  // Progress tracking for "Update All" check-all-replies
+  const [checkAllProgress, setCheckAllProgress] = useState<{
+    total: number; completed: number; repliesFound: number; errors: number;
+  } | null>(null);
+
   // Notification toast
   const [notification, setNotification] = useState<string | null>(null);
   const notifTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const progressHandlerRef = useRef<ReturnType<typeof window.api.queue.onProgress> | null>(null);
+  const checkAllProgressRef = useRef<{ total: number; completed: number; repliesFound: number; errors: number } | null>(null);
+  const onOverdueChangeRef = useRef(onOverdueChange);
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
-  function showNotification(msg: string) {
+  const showNotification = useCallback((msg: string) => {
     if (notifTimerRef.current) clearTimeout(notifTimerRef.current);
     setNotification(msg);
     notifTimerRef.current = setTimeout(() => setNotification(null), 3500);
-  }
+  }, []);
 
   function setCardError(id: number, msg: string) {
     setCardErrors((prev) => ({ ...prev, [id]: msg }));
@@ -225,6 +242,147 @@ export default function TrackingPage({ onOverdueChange }: TrackingPageProps) {
     fetchLeads();
   }, [fetchLeads]);
 
+  // Keep onOverdueChangeRef current so the queue handler always has the latest prop.
+  useEffect(() => {
+    onOverdueChangeRef.current = onOverdueChange;
+  }, [onOverdueChange]);
+
+  // Subscribe to queue progress events; sync with in-flight jobs on mount.
+  useEffect(() => {
+    window.api.queue.getStatus().then((snapshot) => {
+      const fuJobs = snapshot.actionQueue.filter(
+        (item) =>
+          item.type === 'send-followup' &&
+          (item.status === 'queued' || item.status === 'active' || item.status === 'failed')
+      );
+      if (fuJobs.length > 0) {
+        const state: Record<number, CardQueueInfo> = {};
+        for (const job of fuJobs) {
+          const leadId = job.payload.leadId as number | undefined;
+          if (leadId !== undefined) {
+            state[leadId] = {
+              jobId: job.id,
+              status: job.status as CardQueueInfo['status'],
+              error: job.error,
+            };
+          }
+        }
+        setFollowUpQueueState(state);
+      }
+
+      const checkJobs = snapshot.dataQueue.filter(
+        (item) =>
+          item.type === 'check-replies' &&
+          (item.status === 'queued' || item.status === 'active')
+      );
+      if (checkJobs.length > 0) {
+        const progress = { total: checkJobs.length, completed: 0, repliesFound: 0, errors: 0 };
+        checkAllProgressRef.current = progress;
+        setCheckAllProgress(progress);
+        setCheckAllRunning(true);
+      }
+    });
+
+    const handler = window.api.queue.onProgress((item) => {
+      if (item.type === 'send-followup') {
+        const leadId = item.payload.leadId as number | undefined;
+        if (leadId === undefined) return;
+
+        if (item.status === 'completed') {
+          setFollowUpQueueState((prev) => {
+            const n = { ...prev };
+            delete n[leadId];
+            return n;
+          });
+          // Close composer if it's open for this lead
+          setComposerLeadId((prev) => {
+            if (prev === leadId) {
+              setComposerData(null);
+              setComposerEditedMessage('');
+              setComposerError(null);
+              setComposerGenerating(false);
+              setComposerSending(false);
+              return null;
+            }
+            return prev;
+          });
+          fetchLeads().then(() => onOverdueChangeRef.current?.());
+          showNotification('Follow-up sent successfully.');
+        } else if (item.status === 'cancelled') {
+          setFollowUpQueueState((prev) => {
+            const n = { ...prev };
+            delete n[leadId];
+            return n;
+          });
+          setComposerLeadId((prev) => {
+            if (prev === leadId) setComposerSending(false);
+            return prev;
+          });
+        } else if (item.status === 'failed') {
+          setFollowUpQueueState((prev) => ({
+            ...prev,
+            [leadId]: { jobId: item.id, status: 'failed', error: item.error },
+          }));
+          setComposerLeadId((prev) => {
+            if (prev === leadId) {
+              setComposerError(item.error ?? 'Failed to send follow-up.');
+              setComposerSending(false);
+            }
+            return prev;
+          });
+        } else {
+          // queued or active
+          setFollowUpQueueState((prev) => ({
+            ...prev,
+            [leadId]: { jobId: item.id, status: item.status as CardQueueInfo['status'] },
+          }));
+        }
+      }
+
+      if (item.type === 'check-replies') {
+        if (item.status === 'completed' || item.status === 'failed' || item.status === 'cancelled') {
+          const hasReply =
+            item.status === 'completed' &&
+            (item.result as Record<string, unknown> | undefined)?.hasReply === true;
+
+          const prev = checkAllProgressRef.current;
+          const next = prev
+            ? {
+                ...prev,
+                completed: prev.completed + 1,
+                repliesFound: prev.repliesFound + (hasReply ? 1 : 0),
+                errors: prev.errors + (item.status === 'failed' ? 1 : 0),
+              }
+            : null;
+          checkAllProgressRef.current = next;
+          setCheckAllProgress(next ? { ...next } : null);
+
+          if (next && next.completed >= next.total) {
+            setCheckAllRunning(false);
+            setCheckAllResult({
+              checked: next.completed,
+              repliesFound: next.repliesFound,
+              errors: next.errors,
+            });
+            checkAllProgressRef.current = null;
+            if (next.repliesFound > 0) {
+              fetchLeads();
+              onOverdueChangeRef.current?.();
+            }
+          }
+        }
+      }
+    });
+
+    progressHandlerRef.current = handler;
+    return () => {
+      if (progressHandlerRef.current) {
+        window.api.queue.removeProgressListener(progressHandlerRef.current);
+        progressHandlerRef.current = null;
+      }
+    };
+  }, [fetchLeads, showNotification]);
+
   // ── Check for replies (single lead) ──────────────────────────────────────
 
   async function checkReply(id: number) {
@@ -256,18 +414,21 @@ export default function TrackingPage({ onOverdueChange }: TrackingPageProps) {
   async function checkAllReplies() {
     setCheckAllRunning(true);
     setCheckAllResult(null);
+    setCheckAllProgress(null);
+    checkAllProgressRef.current = null;
     try {
       const result = await window.api.checkAllReplies();
-      if (result.success) {
-        setCheckAllResult({ checked: result.checked, repliesFound: result.repliesFound, errors: result.errors });
-        if (result.repliesFound > 0) {
-          await fetchLeads();
-          onOverdueChange?.();
-        }
+      if ('queued' in result && result.queued) {
+        const progress = { total: result.count, completed: 0, repliesFound: 0, errors: 0 };
+        checkAllProgressRef.current = progress;
+        setCheckAllProgress(progress);
+        // checkAllRunning stays true; progress listener handles completion.
+      } else if ('success' in result && result.success === false) {
+        showNotification(result.error || 'Update All failed.');
+        setCheckAllRunning(false);
       }
     } catch (err) {
-      showNotification(err instanceof Error ? err.message : "Update All failed.");
-    } finally {
+      showNotification(err instanceof Error ? err.message : 'Update All failed.');
       setCheckAllRunning(false);
     }
   }
@@ -336,18 +497,23 @@ export default function TrackingPage({ onOverdueChange }: TrackingPageProps) {
     if (!composerLeadId || !composerEditedMessage.trim()) return;
     setComposerSending(true);
     setComposerError(null);
+    const leadId = composerLeadId;
     try {
-      const result = await window.api.sendFollowUp(composerLeadId, composerEditedMessage.trim());
-      if (!result.success) {
-        setComposerError(result.error);
-        return;
+      const result = await window.api.sendFollowUp(leadId, composerEditedMessage.trim());
+      if ('queued' in result && result.queued) {
+        setFollowUpQueueState((prev) => ({
+          ...prev,
+          [leadId]: { jobId: result.jobId, status: 'queued' },
+        }));
+        // Composer stays open showing "Queued"; progress listener closes it on completion.
+      } else if ('success' in result && result.success === false) {
+        const msg = result.needsLogin
+          ? 'Your LinkedIn session has expired. Please log in again via the Compose page.'
+          : result.error;
+        setComposerError(msg);
       }
-      closeComposer();
-      await fetchLeads();
-      showNotification("Follow-up sent successfully.");
-      onOverdueChange?.();
     } catch (err) {
-      setComposerError(err instanceof Error ? err.message : "Failed to send follow-up.");
+      setComposerError(err instanceof Error ? err.message : 'Failed to send follow-up.');
     } finally {
       setComposerSending(false);
     }
@@ -357,6 +523,13 @@ export default function TrackingPage({ onOverdueChange }: TrackingPageProps) {
 
   const composerLead = leads.find((l) => l.id === composerLeadId) ?? null;
   const displayedLeads = filterLeads(sortLeads(leads, sortBy), filterBy, dateFrom, dateTo);
+
+  // Composer queue state derived from followUpQueueState
+  const composerQueueInfo = composerLeadId != null ? followUpQueueState[composerLeadId] : undefined;
+  const isComposerQueued = composerQueueInfo?.status === 'queued';
+  const isComposerActivelySending = composerQueueInfo?.status === 'active' || composerSending;
+  const isComposerFailed = composerQueueInfo?.status === 'failed';
+  const isComposerInQueue = isComposerQueued || isComposerActivelySending;
 
   // ── Render: loading / error ───────────────────────────────────────────────
 
@@ -401,7 +574,9 @@ export default function TrackingPage({ onOverdueChange }: TrackingPageProps) {
             {checkAllRunning ? (
               <span className="drafts-refresh-all-progress">
                 <span className="bulk-spinner-inline" aria-hidden="true" />
-                Checking all…
+                {checkAllProgress
+                  ? `Checking ${checkAllProgress.completed} of ${checkAllProgress.total}…`
+                  : 'Checking all…'}
               </span>
             ) : checkAllResult ? (
               <span className="tracking-check-all-result">
@@ -715,31 +890,56 @@ export default function TrackingPage({ onOverdueChange }: TrackingPageProps) {
                   />
                 </div>
 
-                {composerError && (
+                {composerError && !isComposerFailed && (
                   <div className="fu-modal__send-error">{composerError}</div>
+                )}
+
+                {isComposerFailed && composerQueueInfo?.error && (
+                  <div className="fu-modal__send-error">
+                    <span>{composerQueueInfo.error}</span>
+                    <button
+                      className="btn btn-send btn--sm"
+                      onClick={async () => {
+                        if (composerQueueInfo?.jobId) {
+                          setComposerError(null);
+                          // Re-enqueue the failed job; progress event will update state
+                          await window.api.queue.retry(composerQueueInfo.jobId);
+                        }
+                      }}
+                    >
+                      Retry
+                    </button>
+                  </div>
                 )}
 
                 {/* Actions */}
                 <div className="fu-modal__actions">
                   <button
                     className="btn btn-secondary"
-                    onClick={closeComposer}
-                    disabled={composerSending}
+                    onClick={async () => {
+                      if (isComposerQueued && composerQueueInfo?.jobId) {
+                        await window.api.queue.cancel(composerQueueInfo.jobId);
+                      }
+                      closeComposer();
+                    }}
+                    disabled={isComposerActivelySending}
                   >
-                    Cancel
+                    {isComposerQueued ? 'Cancel (Queued)' : 'Cancel'}
                   </button>
                   <button
                     className="btn btn-send"
                     onClick={sendFollowUp}
-                    disabled={composerSending || !composerEditedMessage.trim()}
+                    disabled={isComposerInQueue || isComposerFailed || !composerEditedMessage.trim()}
                   >
-                    {composerSending ? (
+                    {isComposerActivelySending ? (
                       <>
                         <span className="bulk-spinner-inline" aria-hidden="true" />
                         Sending…
                       </>
+                    ) : isComposerQueued ? (
+                      'Queued'
                     ) : (
-                      "Send ▸"
+                      'Send ▸'
                     )}
                   </button>
                 </div>

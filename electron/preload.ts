@@ -64,6 +64,9 @@ contextBridge.exposeInMainWorld('api', {
   deleteLead: (leadId: number) =>
     ipcRenderer.invoke(IPC.LEAD_DELETE, { leadId }),
 
+  deleteLeads: (ids: number[]) =>
+    ipcRenderer.invoke(IPC.LEAD_BULK_DELETE, { ids }),
+
   regenerateDraft: (leadId: number) =>
     ipcRenderer.invoke(IPC.LEAD_REGENERATE, { leadId }),
 
@@ -111,4 +114,48 @@ contextBridge.exposeInMainWorld('api', {
 
   reopenLead: (leadId: number) =>
     ipcRenderer.invoke(IPC.LEAD_REOPEN, { leadId }),
+
+  queue: {
+    getStatus: () =>
+      ipcRenderer.invoke(IPC.QUEUE_STATUS),
+
+    cancel: (jobId: string) =>
+      ipcRenderer.invoke(IPC.QUEUE_CANCEL, { jobId }),
+
+    cancelAll: (queueName?: string) =>
+      ipcRenderer.invoke(IPC.QUEUE_CANCEL, { queueName }),
+
+    retry: (jobId: string) =>
+      ipcRenderer.invoke(IPC.QUEUE_RETRY, { jobId }),
+
+    onProgress: (callback: (data: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
+      ipcRenderer.on(IPC.QUEUE_PROGRESS, handler)
+      return handler
+    },
+
+    removeProgressListener: (handler: (event: unknown, data: unknown) => void) => {
+      ipcRenderer.off(IPC.QUEUE_PROGRESS, handler as Parameters<typeof ipcRenderer.off>[1])
+    },
+
+    onDrained: (callback: (data: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
+      ipcRenderer.on(IPC.QUEUE_DRAINED, handler)
+      return handler
+    },
+
+    removeDrainedListener: (handler: (event: unknown, data: unknown) => void) => {
+      ipcRenderer.off(IPC.QUEUE_DRAINED, handler as Parameters<typeof ipcRenderer.off>[1])
+    },
+
+    onSessionExpired: (callback: () => void) => {
+      const handler = (_event: Electron.IpcRendererEvent) => callback()
+      ipcRenderer.on(IPC.QUEUE_SESSION_EXPIRED, handler)
+      return handler
+    },
+
+    removeSessionExpiredListener: (handler: (event: unknown) => void) => {
+      ipcRenderer.off(IPC.QUEUE_SESSION_EXPIRED, handler as Parameters<typeof ipcRenderer.off>[1])
+    },
+  },
 })

@@ -2,7 +2,6 @@ import { ipcMain, BrowserWindow } from 'electron'
 import { IPC } from '../../src/shared/ipc-channels'
 import { cookiesExist, deleteCookies } from '../../src/backend/auth'
 import { scrapeProfiles } from '../../src/backend/scraper'
-import { sendLinkedInMessage } from '../../src/backend/sender'
 import { summarizeProfile, parseOutreachResponse, generateFollowUp, generateReplyAssist, generateReEngagement } from '../../src/backend/summarizer'
 import {
   upsertProfile,
@@ -21,15 +20,16 @@ import {
   getLeadWithProfileById,
   updateLeadDraft,
   deleteLead,
+  deleteLeads,
   transitionStage,
   getNextFollowUpType,
-  recordFollowUpSent,
   getOverdueFollowUpCount,
   getLeadsByStage,
   getConversationThread,
   autoTransitionToCold,
 } from '../../src/backend/lead-service'
 import * as log from '../../src/backend/logger'
+import { enqueue, registerJobHandler } from '../queue'
 
 const CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000 // 3 days in milliseconds
 
@@ -69,6 +69,134 @@ function correctConversationType(
 }
 
 export function registerLeadHandlers(): void {
+  // ─── Data-queue job handlers ──────────────────────────────────────────────
+
+  registerJobHandler('refresh-profile', async (payload) => {
+    const leadId = payload.leadId as number
+    const linkedinUrl = payload.linkedinUrl as string
+
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win) {
+      log.setLogForwarder((level, component, message, timestamp) => {
+        if (!win.isDestroyed()) {
+          win.webContents.send(IPC.SCRAPE_LOG, { level, component, message, timestamp })
+        }
+      })
+    }
+
+    try {
+      const scrapeResult = await runScrape(linkedinUrl)
+      if ('error' in scrapeResult) return scrapeResult
+
+      log.info('ipc/lead', `Profile refreshed for lead ${leadId}`)
+      const updated = getLeadWithProfileById(leadId)
+      if (!updated) {
+        return { success: false, error: `Lead ${leadId} not found after profile refresh.` }
+      }
+      return updated
+    } finally {
+      log.clearLogForwarder()
+    }
+  })
+
+  registerJobHandler('refresh-both', async (payload) => {
+    const leadId = payload.leadId as number
+    const linkedinUrl = payload.linkedinUrl as string
+
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win) {
+      log.setLogForwarder((level, component, message, timestamp) => {
+        if (!win.isDestroyed()) {
+          win.webContents.send(IPC.SCRAPE_LOG, { level, component, message, timestamp })
+        }
+      })
+    }
+
+    try {
+      const scrapeResult = await runScrape(linkedinUrl)
+      if ('error' in scrapeResult) return scrapeResult
+
+      const regenResult = await regenerateLeadDraft(leadId)
+      if ('success' in regenResult && regenResult.success === false) return regenResult
+
+      log.info('ipc/lead', `Profile and draft refreshed for lead ${leadId}`)
+      const updated = getLeadWithProfileById(leadId)
+      if (!updated) {
+        return { success: false, error: `Lead ${leadId} not found after refresh.` }
+      }
+      return updated
+    } finally {
+      log.clearLogForwarder()
+    }
+  })
+
+  registerJobHandler('check-replies', async (payload) => {
+    const leadId = payload.leadId as number
+    const profileId = payload.profileId as number
+    const linkedinUrl = payload.linkedinUrl as string
+
+    const db = getDb()
+    const storedMessages = db
+      .prepare<number[], { sender: string; text: string }>(
+        'SELECT sender, text FROM linkedin_messages WHERE profile_id = ? ORDER BY sort_order ASC'
+      )
+      .all(profileId) as { sender: string; text: string }[]
+
+    const storedKeys = new Set<string>(storedMessages.map((m) => `${m.sender}::${m.text}`))
+
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win) {
+      log.setLogForwarder((level, component, message, timestamp) => {
+        if (!win.isDestroyed()) {
+          win.webContents.send(IPC.SCRAPE_LOG, { level, component, message, timestamp })
+        }
+      })
+    }
+
+    try {
+      const scrapeResult = await runScrape(linkedinUrl)
+      if ('error' in scrapeResult) return scrapeResult
+
+      const freshMessages = db
+        .prepare<number[], { sender: string; text: string }>(
+          'SELECT sender, text FROM linkedin_messages WHERE profile_id = ? ORDER BY sort_order ASC'
+        )
+        .all(profileId) as { sender: string; text: string }[]
+
+      const newReplies = freshMessages.filter(
+        (m) => m.sender !== 'self' && !storedKeys.has(`${m.sender}::${m.text}`)
+      )
+
+      if (newReplies.length > 0) {
+        transitionStage(leadId, 'contacted', 'replied', 'system')
+        db.prepare(
+          `UPDATE leads SET replied_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
+        ).run(leadId)
+
+        for (const reply of newReplies) {
+          addToThread(leadId, 'reply_received', 'them', reply.text)
+        }
+
+        log.info('ipc/lead', `Reply detected for lead ${leadId} — transitioned to replied`)
+      }
+
+      try {
+        autoTransitionToCold()
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        log.error('ipc/lead', `Auto-cold transition failed during check-replies for lead ${leadId}: ${errMsg}`)
+      }
+
+      return newReplies.length > 0
+        ? { success: true, hasReply: true, replyContent: newReplies }
+        : { success: true, hasReply: false }
+    } finally {
+      log.clearLogForwarder()
+    }
+  })
+
+  // ─── IPC handlers ─────────────────────────────────────────────────────────
+
   ipcMain.handle(IPC.LEAD_CHECK_DUPLICATE, async (_event, { url }: { url: string }) => {
     if (!url || typeof url !== 'string' || url.trim() === '') {
       return { exists: false }
@@ -261,6 +389,14 @@ export function registerLeadHandlers(): void {
     return { success: true }
   })
 
+  ipcMain.handle(IPC.LEAD_BULK_DELETE, (_event, { ids }: { ids: number[] }) => {
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return { success: false, error: 'ids must be a non-empty array.' }
+    }
+    deleteLeads(ids)
+    return { success: true }
+  })
+
   ipcMain.handle(IPC.LEAD_REGENERATE, async (_event, { leadId }: { leadId: number }) => {
     return regenerateLeadDraft(leadId)
   })
@@ -297,39 +433,14 @@ export function registerLeadHandlers(): void {
       }
 
       try {
-        await sendLinkedInMessage(linkedinUrl, messageText)
+        const { jobId } = enqueue('send-initial', { leadId, linkedinUrl, messageText })
+        log.info('ipc/lead', `Lead ${leadId} send enqueued as job ${jobId}`)
+        return { queued: true, jobId }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
-        if (errMsg === 'SESSION_EXPIRED') {
-          deleteCookies()
-          log.error('ipc/lead', 'LinkedIn session expired during send; cookies deleted')
-          return { success: false, needsLogin: true, error: 'Your LinkedIn session has expired. Please log in again.' }
-        }
-        log.error('ipc/lead', `sendLinkedInMessage failed: ${errMsg}`)
-        return { success: false, error: `Failed to send message: ${errMsg}` }
+        log.error('ipc/lead', `Failed to enqueue send-initial for lead ${leadId}: ${errMsg}`)
+        return { success: false, error: errMsg }
       }
-
-      transitionStage(leadId, 'draft', 'contacted', 'user')
-
-      getDb()
-        .prepare(
-          `UPDATE leads SET initial_sent_at = datetime('now'), last_contacted_at = datetime('now'), next_follow_up_at = datetime('now', '+3 days'), follow_up_count = 0, updated_at = datetime('now') WHERE id = ?`
-        )
-        .run(leadId)
-
-      const db = getDb()
-      const existingThread = db
-        .prepare(`SELECT id FROM outreach_thread WHERE lead_id = ? AND message_type = 'initial'`)
-        .get(leadId) as { id: number } | undefined
-
-      if (existingThread) {
-        db.prepare(`UPDATE outreach_thread SET sent_at = datetime('now') WHERE id = ?`).run(existingThread.id)
-      } else {
-        addToThread(leadId, 'initial', 'self', messageText)
-      }
-
-      log.info('ipc/lead', `Lead ${leadId} sent and transitioned to contacted`)
-      return { success: true }
     }
   )
 
@@ -346,27 +457,17 @@ export function registerLeadHandlers(): void {
         return { success: false, error: `Profile for lead ${leadId} not found.` }
       }
 
-      const win = BrowserWindow.getAllWindows()[0]
-      if (win) {
-        log.setLogForwarder((level, component, message, timestamp) => {
-          if (!win.isDestroyed()) {
-            win.webContents.send(IPC.SCRAPE_LOG, { level, component, message, timestamp })
-          }
-        })
-      }
-
       try {
-        const scrapeResult = await runScrape(linkedinUrl)
-        if ('error' in scrapeResult) return scrapeResult
-
-        log.info('ipc/lead', `Profile refreshed for lead ${leadId}`)
-        const updated = getLeadWithProfileById(leadId)
-        if (!updated) {
-          return { success: false, error: `Lead ${leadId} not found after profile refresh.` }
-        }
-        return updated
-      } finally {
-        log.clearLogForwarder()
+        const enqueued = enqueue(
+          'refresh-profile',
+          { leadId, linkedinUrl },
+          { waitForResult: true }
+        ) as { jobId: string; result: Promise<unknown> }
+        return await enqueued.result
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        log.error('ipc/lead', `refresh-profile job failed for lead ${leadId}: ${errMsg}`)
+        return { success: false, error: errMsg }
       }
     }
   )
@@ -384,30 +485,17 @@ export function registerLeadHandlers(): void {
         return { success: false, error: `Profile for lead ${leadId} not found.` }
       }
 
-      const win = BrowserWindow.getAllWindows()[0]
-      if (win) {
-        log.setLogForwarder((level, component, message, timestamp) => {
-          if (!win.isDestroyed()) {
-            win.webContents.send(IPC.SCRAPE_LOG, { level, component, message, timestamp })
-          }
-        })
-      }
-
       try {
-        const scrapeResult = await runScrape(linkedinUrl)
-        if ('error' in scrapeResult) return scrapeResult
-
-        const regenResult = await regenerateLeadDraft(leadId)
-        if ('success' in regenResult && regenResult.success === false) return regenResult
-
-        log.info('ipc/lead', `Profile and draft refreshed for lead ${leadId}`)
-        const updated = getLeadWithProfileById(leadId)
-        if (!updated) {
-          return { success: false, error: `Lead ${leadId} not found after refresh.` }
-        }
-        return updated
-      } finally {
-        log.clearLogForwarder()
+        const enqueued = enqueue(
+          'refresh-both',
+          { leadId, linkedinUrl },
+          { waitForResult: true }
+        ) as { jobId: string; result: Promise<unknown> }
+        return await enqueued.result
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        log.error('ipc/lead', `refresh-both job failed for lead ${leadId}: ${errMsg}`)
+        return { success: false, error: errMsg }
       }
     }
   )
@@ -495,23 +583,14 @@ export function registerLeadHandlers(): void {
       }
 
       try {
-        await sendLinkedInMessage(linkedinUrl, message.trim())
+        const { jobId } = enqueue('send-followup', { leadId, linkedinUrl, messageText: message.trim(), followUpType })
+        log.info('ipc/lead', `Lead ${leadId} follow-up enqueued as job ${jobId}`)
+        return { queued: true, jobId }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
-        if (errMsg === 'SESSION_EXPIRED') {
-          deleteCookies()
-          log.error('ipc/lead', 'LinkedIn session expired during follow-up send; cookies deleted')
-          return { success: false, needsLogin: true, error: 'Your LinkedIn session has expired. Please log in again.' }
-        }
-        log.error('ipc/lead', `sendLinkedInMessage failed for follow-up: ${errMsg}`)
-        return { success: false, error: `Failed to send follow-up: ${errMsg}` }
+        log.error('ipc/lead', `Failed to enqueue send-followup for lead ${leadId}: ${errMsg}`)
+        return { success: false, error: errMsg }
       }
-
-      addToThread(leadId, followUpType, 'self', message.trim())
-      recordFollowUpSent(leadId)
-
-      log.info('ipc/lead', `Follow-up (${followUpType}) sent for lead ${leadId}`)
-      return { success: true }
     }
   )
 
@@ -528,133 +607,42 @@ export function registerLeadHandlers(): void {
         return { success: false, error: `Profile for lead ${leadId} not found.` }
       }
 
-      // Capture stored messages before the scrape overwrites linkedin_messages.
-      const db = getDb()
-      const storedMessages = db
-        .prepare<number[], { sender: string; text: string }>(
-          'SELECT sender, text FROM linkedin_messages WHERE profile_id = ? ORDER BY sort_order ASC'
-        )
-        .all(lead.profile_id) as { sender: string; text: string }[]
-
-      const storedKeys = new Set<string>(storedMessages.map((m) => `${m.sender}::${m.text}`))
-
-      const win = BrowserWindow.getAllWindows()[0]
-      if (win) {
-        log.setLogForwarder((level, component, message, timestamp) => {
-          if (!win.isDestroyed()) {
-            win.webContents.send(IPC.SCRAPE_LOG, { level, component, message, timestamp })
-          }
-        })
-      }
-
       try {
-        const scrapeResult = await runScrape(linkedinUrl)
-        if ('error' in scrapeResult) return scrapeResult
-
-        // Read fresh messages after the scrape has updated linkedin_messages.
-        const freshMessages = db
-          .prepare<number[], { sender: string; text: string }>(
-            'SELECT sender, text FROM linkedin_messages WHERE profile_id = ? ORDER BY sort_order ASC'
-          )
-          .all(lead.profile_id) as { sender: string; text: string }[]
-
-        const newReplies = freshMessages.filter(
-          (m) => m.sender !== 'self' && !storedKeys.has(`${m.sender}::${m.text}`)
-        )
-
-        if (newReplies.length > 0) {
-          transitionStage(leadId, 'contacted', 'replied', 'system')
-          db.prepare(
-            `UPDATE leads SET replied_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
-          ).run(leadId)
-
-          for (const reply of newReplies) {
-            addToThread(leadId, 'reply_received', 'them', reply.text)
-          }
-
-          log.info('ipc/lead', `Reply detected for lead ${leadId} — transitioned to replied`)
-          return { success: true, hasReply: true, replyContent: newReplies }
-        }
-
-        return { success: true, hasReply: false }
-      } finally {
-        log.clearLogForwarder()
+        const enqueued = enqueue(
+          'check-replies',
+          { leadId, profileId: lead.profile_id, linkedinUrl },
+          { waitForResult: true }
+        ) as { jobId: string; result: Promise<unknown> }
+        return await enqueued.result
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        log.error('ipc/lead', `check-replies job failed for lead ${leadId}: ${errMsg}`)
+        return { success: false, error: errMsg }
       }
     }
   )
 
   ipcMain.handle(IPC.LEAD_CHECK_ALL_REPLIES, async () => {
     const contactedLeads = getLeadsByStage('contacted')
-    const results = { checked: 0, repliesFound: 0, errors: 0 }
+    let enqueued = 0
 
     for (const lead of contactedLeads) {
-      results.checked++
-
       const linkedinUrl = getProfileLinkedInUrl(lead.profile_id)
       if (!linkedinUrl) {
         log.error('ipc/lead', `No LinkedIn URL for lead ${lead.id} — skipping`)
-        results.errors++
         continue
       }
-
       try {
-        const db = getDb()
-        const storedMessages = db
-          .prepare<number[], { sender: string; text: string }>(
-            'SELECT sender, text FROM linkedin_messages WHERE profile_id = ? ORDER BY sort_order ASC'
-          )
-          .all(lead.profile_id) as { sender: string; text: string }[]
-
-        const storedKeys = new Set<string>(storedMessages.map((m) => `${m.sender}::${m.text}`))
-
-        const scrapeResult = await runScrape(linkedinUrl)
-        if ('error' in scrapeResult) {
-          log.error('ipc/lead', `Scrape failed for lead ${lead.id}: ${scrapeResult.error}`)
-          results.errors++
-          continue
-        }
-
-        const freshMessages = db
-          .prepare<number[], { sender: string; text: string }>(
-            'SELECT sender, text FROM linkedin_messages WHERE profile_id = ? ORDER BY sort_order ASC'
-          )
-          .all(lead.profile_id) as { sender: string; text: string }[]
-
-        const newReplies = freshMessages.filter(
-          (m) => m.sender !== 'self' && !storedKeys.has(`${m.sender}::${m.text}`)
-        )
-
-        if (newReplies.length > 0) {
-          transitionStage(lead.id, 'contacted', 'replied', 'system')
-          db.prepare(
-            `UPDATE leads SET replied_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
-          ).run(lead.id)
-
-          for (const reply of newReplies) {
-            addToThread(lead.id, 'reply_received', 'them', reply.text)
-          }
-
-          log.info('ipc/lead', `Reply detected for lead ${lead.id} during check-all`)
-          results.repliesFound++
-        }
+        enqueue('check-replies', { leadId: lead.id, profileId: lead.profile_id, linkedinUrl })
+        enqueued++
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
-        log.error('ipc/lead', `Error checking replies for lead ${lead.id}: ${errMsg}`)
-        results.errors++
+        log.error('ipc/lead', `Failed to enqueue check-replies for lead ${lead.id}: ${errMsg}`)
       }
     }
 
-    log.info('ipc/lead', `check-all-replies complete: checked=${results.checked} replies=${results.repliesFound} errors=${results.errors}`)
-
-    let autoColdCount = 0
-    try {
-      autoColdCount = autoTransitionToCold()
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err)
-      log.error('ipc/lead', `Auto-cold transition failed: ${errMsg}`)
-    }
-
-    return { success: true, ...results, autoColdCount }
+    log.info('ipc/lead', `check-all-replies: enqueued ${enqueued} jobs`)
+    return { queued: true, count: enqueued }
   })
 
   ipcMain.handle(IPC.LEAD_MARK_COLD, (_event, { leadId }: { leadId: number }) => {
@@ -743,25 +731,14 @@ export function registerLeadHandlers(): void {
       }
 
       try {
-        await sendLinkedInMessage(linkedinUrl, message.trim())
+        const { jobId } = enqueue('send-reply', { leadId, linkedinUrl, messageText: message.trim() })
+        log.info('ipc/lead', `Lead ${leadId} reply enqueued as job ${jobId}`)
+        return { queued: true, jobId }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
-        if (errMsg === 'SESSION_EXPIRED') {
-          deleteCookies()
-          log.error('ipc/lead', 'LinkedIn session expired during reply send; cookies deleted')
-          return { success: false, needsLogin: true, error: 'Your LinkedIn session has expired. Please log in again.' }
-        }
-        log.error('ipc/lead', `sendLinkedInMessage failed for reply: ${errMsg}`)
-        return { success: false, error: `Failed to send reply: ${errMsg}` }
+        log.error('ipc/lead', `Failed to enqueue send-reply for lead ${leadId}: ${errMsg}`)
+        return { success: false, error: errMsg }
       }
-
-      addToThread(leadId, 'reply_sent', 'self', message.trim())
-      getDb()
-        .prepare(`UPDATE leads SET last_contacted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`)
-        .run(leadId)
-
-      log.info('ipc/lead', `Reply sent for lead ${leadId} — stage stays replied`)
-      return { success: true }
     }
   )
 

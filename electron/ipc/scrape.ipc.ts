@@ -6,6 +6,7 @@ import { summarizeProfile, parseOutreachResponse } from '../../src/backend/summa
 import { upsertProfile, getFullProfileData, getSenderConfig } from '../../src/backend/db'
 import type { SenderConfig } from '../../src/backend/db'
 import * as log from '../../src/backend/logger'
+import { enqueue, registerJobHandler } from '../queue'
 
 const CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000 // 3 days in milliseconds
 
@@ -167,6 +168,29 @@ async function processSingleUrl(trimmedUrl: string, forceScrape: boolean, sender
   }
 }
 
+// Register the scrape-profile job handler with the queue executor.
+// Called for both single and bulk scrape jobs.
+registerJobHandler('scrape-profile', async (payload) => {
+  const url = payload.url as string
+  const forceScrape = payload.forceScrape as boolean
+  const senderConfig = payload.senderConfig as SenderConfig
+
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win) {
+    log.setLogForwarder((level, component, message, timestamp) => {
+      if (!win.isDestroyed()) {
+        win.webContents.send(IPC.SCRAPE_LOG, { level, component, message, timestamp })
+      }
+    })
+  }
+
+  try {
+    return await processSingleUrl(url, forceScrape, senderConfig)
+  } finally {
+    log.clearLogForwarder()
+  }
+})
+
 export function registerScrapeHandlers(): void {
   ipcMain.handle(IPC.SCRAPE_RUN, async (_event, { url, forceScrape }: { url?: string; forceScrape?: boolean }) => {
     if (!url || typeof url !== 'string' || url.trim() === '') {
@@ -192,38 +216,27 @@ export function registerScrapeHandlers(): void {
 
     log.init()
 
-    // Set up real-time log forwarding to the renderer window.
-    const win = BrowserWindow.getAllWindows()[0]
-    if (win) {
-      log.setLogForwarder((level, component, message, timestamp) => {
-        if (!win.isDestroyed()) {
-          win.webContents.send(IPC.SCRAPE_LOG, { level, component, message, timestamp })
-        }
-      })
-    }
-
     const senderConfig = getSenderConfig()
     if (!senderConfig) {
       return { error: true, message: 'Sender configuration not found. Please set up your profile in Settings.' }
     }
 
     try {
-      return await processSingleUrl(trimmedUrl, forceScrape ?? false, senderConfig)
-    } finally {
-      log.clearLogForwarder()
+      const enqueued = enqueue(
+        'scrape-profile',
+        { url: trimmedUrl, forceScrape: forceScrape ?? false, senderConfig },
+        { waitForResult: true }
+      ) as { jobId: string; result: Promise<unknown> }
+      return await enqueued.result
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      log.error('ipc/scrape', `scrape-profile job failed: ${message}`)
+      return { error: true, message }
     }
   })
 }
 
-// Cancellation flag shared between the bulk handler and the cancel handler.
-let bulkCancelRequested = false
-
 export function registerBulkScrapeHandlers(): void {
-  ipcMain.handle(IPC.SCRAPE_BULK_CANCEL, async () => {
-    bulkCancelRequested = true
-    return { success: true }
-  })
-
   ipcMain.handle(
     IPC.SCRAPE_BULK_RUN,
     async (_event, { urls, forceScrape }: { urls?: string[]; forceScrape?: boolean }) => {
@@ -262,76 +275,16 @@ export function registerBulkScrapeHandlers(): void {
 
       log.init()
 
-      const win = BrowserWindow.getAllWindows()[0]
-      const sendProgress = (payload: object) => {
-        if (win && !win.isDestroyed()) {
-          win.webContents.send(IPC.SCRAPE_BULK_PROGRESS, payload)
-        }
-      }
-
-      // Forward scrape logs to the renderer window during bulk processing.
-      if (win) {
-        log.setLogForwarder((level, component, message, timestamp) => {
-          if (!win.isDestroyed()) {
-            win.webContents.send(IPC.SCRAPE_LOG, { level, component, message, timestamp })
-          }
-        })
-      }
-
       const senderConfig = getSenderConfig()
       if (!senderConfig) {
         return { error: true, message: 'Sender configuration not found. Please set up your profile in Settings.' }
       }
 
-      bulkCancelRequested = false
-
-      const total = validUrls.length
-      let succeeded = 0
-      let failed = 0
-      let cancelled = 0
-
-      try {
-        for (let i = 0; i < validUrls.length; i++) {
-          // Check cancellation before starting each URL.
-          if (bulkCancelRequested) {
-            cancelled = total - i
-            sendProgress({ type: 'cancelled', current: i, total, cancelled })
-            break
-          }
-
-          const url = validUrls[i]
-
-          sendProgress({ type: 'processing', current: i, total, url })
-
-          const result = await processSingleUrl(url, forceScrape ?? false, senderConfig)
-
-          if ('error' in result) {
-            failed++
-            sendProgress({ type: 'url-error', current: i + 1, total, url, error: result.message })
-            // If session expired, abort the batch.
-            if ('needsLogin' in result && result.needsLogin) {
-              cancelled = total - (i + 1)
-              sendProgress({ type: 'cancelled', current: i + 1, total, cancelled, needsLogin: true })
-              break
-            }
-          } else {
-            succeeded++
-            sendProgress({
-              type: 'url-done',
-              current: i + 1,
-              total,
-              url,
-              profile: result.profile,
-            })
-          }
-        }
-      } finally {
-        log.clearLogForwarder()
+      for (const url of validUrls) {
+        enqueue('scrape-profile', { url, forceScrape: forceScrape ?? false, senderConfig })
       }
 
-      const summary = { total, succeeded, failed, cancelled, invalidUrls }
-      sendProgress({ type: 'complete', ...summary })
-      return { success: true, ...summary }
+      return { success: true, enqueued: validUrls.length, invalidUrls }
     }
   )
 }

@@ -72,7 +72,7 @@ interface LogEntry {
 
 interface UrlItemStatus {
   url: string;
-  status: "pending" | "processing" | "done" | "skipped" | "error";
+  status: "pending" | "processing" | "done" | "skipped" | "error" | "cancelled";
   profileName?: string | null;
   skippedStage?: string;
   error?: string;
@@ -602,7 +602,6 @@ function BulkMode() {
   const [error, setError] = useState<string | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [urlItems, setUrlItems] = useState<UrlItemStatus[]>([]);
-  const [currentIndex, setCurrentIndex] = useState(-1);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [logsExpanded, setLogsExpanded] = useState(false);
 
@@ -612,7 +611,7 @@ function BulkMode() {
     failed: Array<{ url: string; reason: string }>;
   } | null>(null);
 
-  const cancelledRef = useRef(false);
+  const progressHandlerRef = useRef<ReturnType<typeof window.api.queue.onProgress> | null>(null);
   const logHandlerRef = useRef<ReturnType<typeof window.api.onScrapeLog> | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const urlListEndRef = useRef<HTMLDivElement | null>(null);
@@ -622,6 +621,112 @@ function BulkMode() {
   const validCount = validUrls.length;
   const invalidCount = parsedUrls.filter((u) => !isLinkedInProfileUrl(u)).length;
 
+  // Subscribe to queue progress events on mount; sync with in-flight jobs.
+  useEffect(() => {
+    window.api.queue.getStatus().then((snapshot) => {
+      const scrapeJobs = snapshot.dataQueue.filter(
+        (item) =>
+          item.type === "scrape-profile" &&
+          (item.status === "queued" || item.status === "active")
+      );
+      if (scrapeJobs.length > 0) {
+        setBulkState("running");
+        setUrlItems(
+          scrapeJobs.map((job) => ({
+            url: job.payload.url as string,
+            status: job.status === "active" ? "processing" : "pending",
+          }))
+        );
+      }
+    });
+
+    const handler = window.api.queue.onProgress((item) => {
+      if (item.type !== "scrape-profile") return;
+      const url = item.payload.url as string;
+      if (!url) return;
+
+      setUrlItems((prev) => {
+        const exists = prev.some((u) => u.url === url);
+        const baseList = exists ? prev : [...prev, { url, status: "pending" as const }];
+        return baseList.map((u) => {
+          if (u.url !== url) return u;
+          switch (item.status) {
+            case "active":
+              return { ...u, status: "processing" as const };
+            case "completed": {
+              const result = item.result as Record<string, unknown> | undefined;
+              if (result && "duplicate" in result && result.duplicate) {
+                const lead = result.lead as { stage?: string; name?: string } | undefined;
+                return {
+                  ...u,
+                  status: "skipped" as const,
+                  skippedStage: lead?.stage,
+                  profileName: lead?.name,
+                };
+              }
+              if (result && "success" in result && result.success) {
+                const lead = result.lead as { name?: string | null } | undefined;
+                return { ...u, status: "done" as const, profileName: lead?.name ?? null };
+              }
+              return { ...u, status: "done" as const };
+            }
+            case "failed":
+              return { ...u, status: "error" as const, error: item.error ?? "Unknown error" };
+            case "cancelled":
+              return { ...u, status: "cancelled" as const };
+            default:
+              return u;
+          }
+        });
+      });
+
+      if (item.status === "active") {
+        setBulkState((prev) => (prev === "idle" ? "running" : prev));
+      }
+    });
+
+    progressHandlerRef.current = handler;
+    return () => {
+      if (progressHandlerRef.current) {
+        window.api.queue.removeProgressListener(progressHandlerRef.current);
+        progressHandlerRef.current = null;
+      }
+    };
+  }, []);
+
+  // When all items have settled, compute summary and transition to done.
+  useEffect(() => {
+    if (bulkState !== "running" || urlItems.length === 0) return;
+    const allSettled = urlItems.every(
+      (item) =>
+        item.status === "done" ||
+        item.status === "error" ||
+        item.status === "skipped" ||
+        item.status === "cancelled"
+    );
+    if (!allSettled) return;
+
+    const added = urlItems.filter((i) => i.status === "done").length;
+    const skipped = urlItems
+      .filter((i) => i.status === "skipped")
+      .map((i) => ({
+        name: i.profileName || i.url,
+        stage: i.skippedStage || "unknown",
+        url: i.url,
+      }));
+    const failed = urlItems
+      .filter((i) => i.status === "error")
+      .map((i) => ({ url: i.url, reason: i.error || "Unknown error" }));
+
+    setSummary({ added, skipped, failed });
+    setBulkState("done");
+
+    if (logHandlerRef.current) {
+      window.api.offScrapeLog(logHandlerRef.current);
+      logHandlerRef.current = null;
+    }
+  }, [urlItems, bulkState]);
+
   useEffect(() => {
     if (logsExpanded && logEndRef.current) {
       logEndRef.current.scrollIntoView({ behavior: "smooth" });
@@ -629,20 +734,18 @@ function BulkMode() {
   }, [logEntries, logsExpanded]);
 
   useEffect(() => {
-    if (urlListEndRef.current) {
+    if (bulkState === "running" && urlListEndRef.current) {
       urlListEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [currentIndex]);
+  }, [urlItems, bulkState]);
 
   async function handleStart() {
     setError(null);
     setNeedsLogin(false);
     setSummary(null);
-    cancelledRef.current = false;
 
-    const items: UrlItemStatus[] = validUrls.map((u) => ({ url: u, status: "pending" }));
+    const items: UrlItemStatus[] = validUrls.map((u) => ({ url: u, status: "pending" as const }));
     setUrlItems(items);
-    setCurrentIndex(-1);
     setBulkState("running");
 
     setLogEntries([]);
@@ -651,96 +754,25 @@ function BulkMode() {
     });
     logHandlerRef.current = logHandler;
 
-    const added: number[] = [];
-    const skipped: Array<{ name: string; stage: string; url: string }> = [];
-    const failed: Array<{ url: string; reason: string }> = [];
+    const result = await window.api.scrapeBulk(validUrls, forceScrape);
 
-    for (let i = 0; i < validUrls.length; i++) {
-      if (cancelledRef.current) break;
-
-      const currentUrl = validUrls[i];
-      setCurrentIndex(i);
-      setUrlItems((prev) =>
-        prev.map((item, idx) => idx === i ? { ...item, status: "processing" } : item)
-      );
-
-      try {
-        const dupCheck = await window.api.checkDuplicate(currentUrl);
-        if (dupCheck.exists && dupCheck.lead) {
-          skipped.push({
-            name: dupCheck.lead.name || currentUrl,
-            stage: dupCheck.lead.stage,
-            url: currentUrl,
-          });
-          setUrlItems((prev) =>
-            prev.map((item, idx) =>
-              idx === i ? { ...item, status: "skipped", skippedStage: dupCheck.lead!.stage } : item
-            )
-          );
-          continue;
-        }
-
-        const result = await window.api.createLeadFromScrape(currentUrl, forceScrape);
-
-        if ("success" in result && result.success) {
-          added.push(i);
-          setUrlItems((prev) =>
-            prev.map((item, idx) =>
-              idx === i ? { ...item, status: "done", profileName: result.lead.name } : item
-            )
-          );
-        } else if ("duplicate" in result && result.duplicate) {
-          const leadInfo = result.lead as { stage: string; name: string } | undefined;
-          skipped.push({
-            name: leadInfo?.name || currentUrl,
-            stage: leadInfo?.stage || "unknown",
-            url: currentUrl,
-          });
-          setUrlItems((prev) =>
-            prev.map((item, idx) =>
-              idx === i ? { ...item, status: "skipped", skippedStage: leadInfo?.stage } : item
-            )
-          );
-        } else if ("message" in result) {
-          if (result.needsLogin) {
-            setNeedsLogin(true);
-            setUrlItems((prev) =>
-              prev.map((item, idx) =>
-                idx === i ? { ...item, status: "error", error: "Login required" } : item
-              )
-            );
-            failed.push({ url: currentUrl, reason: "Login required" });
-            break;
-          }
-          failed.push({ url: currentUrl, reason: result.message });
-          setUrlItems((prev) =>
-            prev.map((item, idx) =>
-              idx === i ? { ...item, status: "error", error: result.message } : item
-            )
-          );
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Unexpected error";
-        failed.push({ url: currentUrl, reason: msg });
-        setUrlItems((prev) =>
-          prev.map((item, idx) =>
-            idx === i ? { ...item, status: "error", error: msg } : item
-          )
-        );
+    if ("error" in result) {
+      if (result.needsLogin) {
+        setNeedsLogin(true);
+      } else {
+        setError(result.message);
       }
-    }
-
-    if (logHandlerRef.current) {
-      window.api.offScrapeLog(logHandlerRef.current);
+      setBulkState("idle");
+      setUrlItems([]);
+      window.api.offScrapeLog(logHandler);
       logHandlerRef.current = null;
     }
-
-    setSummary({ added: added.length, skipped, failed });
-    setBulkState("done");
+    // On success: { success: true, enqueued, invalidUrls }
+    // Progress arrives via the queue progress listener set up in the mount useEffect.
   }
 
-  function handleCancel() {
-    cancelledRef.current = true;
+  async function handleCancel() {
+    await window.api.queue.cancelAll("data");
   }
 
   function handleReset() {
@@ -750,14 +782,16 @@ function BulkMode() {
     setError(null);
     setNeedsLogin(false);
     setUrlItems([]);
-    setCurrentIndex(-1);
     setSummary(null);
     setLogEntries([]);
-    cancelledRef.current = false;
   }
 
   const completedCount = urlItems.filter(
-    (i) => i.status === "done" || i.status === "error" || i.status === "skipped"
+    (i) =>
+      i.status === "done" ||
+      i.status === "error" ||
+      i.status === "skipped" ||
+      i.status === "cancelled"
   ).length;
 
   return (
@@ -844,7 +878,7 @@ function BulkMode() {
               <div className="bulk-progress-header">
                 <div className="bulk-progress-label">
                   <span className="bulk-spinner" aria-hidden="true" />
-                  Processing URLs — {completedCount} / {validCount} done
+                  Processing URLs — {completedCount} / {urlItems.length} done
                 </div>
                 <button className="btn btn-secondary btn-sm" onClick={handleCancel}>
                   Cancel
@@ -853,7 +887,7 @@ function BulkMode() {
               <div className="bulk-progress-bar-track">
                 <div
                   className="bulk-progress-bar-fill"
-                  style={{ width: validCount > 0 ? `${(completedCount / validCount) * 100}%` : "0%" }}
+                  style={{ width: urlItems.length > 0 ? `${(completedCount / urlItems.length) * 100}%` : "0%" }}
                 />
               </div>
             </>
@@ -866,6 +900,7 @@ function BulkMode() {
                   {item.status === "done" && "✓"}
                   {item.status === "skipped" && "⊘"}
                   {item.status === "error" && "✗"}
+                  {item.status === "cancelled" && "—"}
                   {item.status === "processing" && <span className="bulk-spinner-inline" />}
                   {item.status === "pending" && "·"}
                 </span>
@@ -881,6 +916,11 @@ function BulkMode() {
                       {item.skippedStage && (
                         <span className="bulk-url-sub">Already in pipeline — {item.skippedStage}</span>
                       )}
+                    </>
+                  ) : item.status === "cancelled" ? (
+                    <>
+                      <span>{item.url}</span>
+                      <span className="bulk-url-sub">Cancelled</span>
                     </>
                   ) : (
                     item.url

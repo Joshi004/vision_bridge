@@ -6,6 +6,7 @@ import { registerScrapeHandlers, registerBulkScrapeHandlers } from './ipc/scrape
 import { registerLoginHandlers } from './ipc/login.ipc'
 import { registerSenderConfigHandlers } from './ipc/sender-config.ipc'
 import { registerLeadHandlers } from './ipc/lead.ipc'
+import { registerQueueHandlers } from './ipc/queue.ipc'
 import { IPC } from '../src/shared/ipc-channels'
 import { findChromePath } from '../src/backend/chrome-finder'
 import { buildAppMenu } from './menu'
@@ -29,7 +30,7 @@ if (!gotLock) {
     }
   })
 
-  function createWindow(): void {
+  function createWindow(): BrowserWindow {
     const preload = join(__dirname, '../preload/preload.mjs')
     const savedState = loadWindowState()
 
@@ -60,6 +61,8 @@ if (!gotLock) {
     } else {
       win.loadFile(join(__dirname, '../renderer/index.html'))
     }
+
+    return win
   }
 
   app.whenReady().then(async () => {
@@ -123,7 +126,8 @@ if (!gotLock) {
       await shell.openPath(getLogsDir())
     })
 
-    createWindow()
+    const win = createWindow()
+    registerQueueHandlers(win)
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {

@@ -43,6 +43,12 @@ function messageTypeLabel(type: string): string {
   }
 }
 
+interface CardQueueInfo {
+  jobId: string;
+  status: 'queued' | 'active' | 'failed';
+  error?: string;
+}
+
 export default function RepliesPage() {
   const [leads, setLeads] = useState<LeadWithProfile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -60,6 +66,10 @@ export default function RepliesPage() {
   const [updatingId, setUpdatingId] = useState<number | null>(null);
   const [markingConvertedId, setMarkingConvertedId] = useState<number | null>(null);
   const [markingColdId, setMarkingColdId] = useState<number | null>(null);
+
+  // Per-card queue state for send-reply jobs
+  const [queueState, setQueueState] = useState<Record<number, CardQueueInfo>>({});
+  const progressHandlerRef = useRef<ReturnType<typeof window.api.queue.onProgress> | null>(null);
 
   // Inline confirmation states
   const [confirmConvertedId, setConfirmConvertedId] = useState<number | null>(null);
@@ -89,11 +99,11 @@ export default function RepliesPage() {
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
-  function showNotification(msg: string) {
+  const showNotification = useCallback((msg: string) => {
     if (notifTimerRef.current) clearTimeout(notifTimerRef.current);
     setNotification(msg);
     notifTimerRef.current = setTimeout(() => setNotification(null), 3500);
-  }
+  }, []);
 
   function setCardError(id: number, msg: string) {
     setCardErrors((prev) => ({ ...prev, [id]: msg }));
@@ -166,6 +176,95 @@ export default function RepliesPage() {
     }
   }, [threads]);
 
+  // Subscribe to queue progress events; sync with in-flight send-reply jobs on mount.
+  useEffect(() => {
+    window.api.queue.getStatus().then((snapshot) => {
+      const replyJobs = snapshot.actionQueue.filter(
+        (item) =>
+          item.type === 'send-reply' &&
+          (item.status === 'queued' || item.status === 'active' || item.status === 'failed')
+      );
+      if (replyJobs.length > 0) {
+        const state: Record<number, CardQueueInfo> = {};
+        for (const job of replyJobs) {
+          const leadId = job.payload.leadId as number | undefined;
+          if (leadId !== undefined) {
+            state[leadId] = {
+              jobId: job.id,
+              status: job.status as CardQueueInfo['status'],
+              error: job.error,
+            };
+          }
+        }
+        setQueueState(state);
+      }
+    });
+
+    const handler = window.api.queue.onProgress((item) => {
+      if (item.type !== 'send-reply') return;
+      const leadId = item.payload.leadId as number | undefined;
+      if (leadId === undefined) return;
+
+      if (item.status === 'completed') {
+        setQueueState((prev) => {
+          const n = { ...prev };
+          delete n[leadId];
+          return n;
+        });
+        // Clear the reply textarea
+        setReplyText((prev) => {
+          const n = { ...prev };
+          delete n[leadId];
+          return n;
+        });
+        // Optimistically append sent message to thread using payload text
+        const messageText = item.payload.message as string | undefined;
+        if (messageText) {
+          const sentMsg: OutreachThreadMessage = {
+            id: Date.now(),
+            lead_id: leadId,
+            message_type: 'reply_sent',
+            sender: 'self',
+            message: messageText,
+            sent_at: new Date().toISOString(),
+            created_at: new Date().toISOString(),
+          };
+          setThreads((prev) => {
+            const existing = prev[leadId] ?? [];
+            return { ...prev, [leadId]: [...existing, sentMsg] };
+          });
+        }
+        showSent(leadId);
+        scrollThreadToBottom(leadId);
+      } else if (item.status === 'cancelled') {
+        setQueueState((prev) => {
+          const n = { ...prev };
+          delete n[leadId];
+          return n;
+        });
+      } else if (item.status === 'failed') {
+        setQueueState((prev) => ({
+          ...prev,
+          [leadId]: { jobId: item.id, status: 'failed', error: item.error },
+        }));
+      } else {
+        // queued or active
+        setQueueState((prev) => ({
+          ...prev,
+          [leadId]: { jobId: item.id, status: item.status as CardQueueInfo['status'] },
+        }));
+      }
+    });
+
+    progressHandlerRef.current = handler;
+    return () => {
+      if (progressHandlerRef.current) {
+        window.api.queue.removeProgressListener(progressHandlerRef.current);
+        progressHandlerRef.current = null;
+      }
+    };
+  }, [showNotification]);
+
   // ── Generate Reply ────────────────────────────────────────────────────────
 
   async function generateReply(id: number) {
@@ -205,38 +304,33 @@ export default function RepliesPage() {
     const message = replyText[id] ?? "";
     if (!message.trim()) return;
 
+    // Clear any previous failed queue state before re-enqueueing
+    if (queueState[id]?.status === 'failed') {
+      setQueueState((prev) => {
+        const n = { ...prev };
+        delete n[id];
+        return n;
+      });
+    }
+
     setSendingId(id);
     clearCardError(id);
     try {
       const result = await window.api.sendReply(id, message.trim());
-      if (!result.success) {
-        let errMsg = result.error;
-        if ("needsLogin" in result && result.needsLogin) {
-          errMsg = "Your LinkedIn session has expired. Please log in again via the Compose page.";
-        }
+      if ('queued' in result && result.queued) {
+        setQueueState((prev) => ({
+          ...prev,
+          [id]: { jobId: result.jobId, status: 'queued' },
+        }));
+        // Thread update and "Sent ✓" come from the progress listener on completion.
+      } else if ('success' in result && result.success === false) {
+        const errMsg = result.needsLogin
+          ? 'Your LinkedIn session has expired. Please log in again via the Compose page.'
+          : result.error;
         setCardError(id, errMsg);
-        return;
       }
-      // Clear textarea
-      setReplyText((prev) => ({ ...prev, [id]: "" }));
-      // Optimistically append sent message to thread
-      const sentMsg: OutreachThreadMessage = {
-        id: Date.now(),
-        lead_id: id,
-        message_type: "reply_sent",
-        sender: "self",
-        message: message.trim(),
-        sent_at: new Date().toISOString(),
-        created_at: new Date().toISOString(),
-      };
-      setThreads((prev) => {
-        const existing = prev[id] ?? [];
-        return { ...prev, [id]: [...existing, sentMsg] };
-      });
-      showSent(id);
-      scrollThreadToBottom(id);
     } catch (err) {
-      setCardError(id, err instanceof Error ? err.message : "Failed to send reply.");
+      setCardError(id, err instanceof Error ? err.message : 'Failed to send reply.');
     } finally {
       setSendingId(null);
     }
@@ -428,12 +522,16 @@ export default function RepliesPage() {
           const name = lead.profile.name ?? "LinkedIn Profile";
           const cardError = cardErrors[id];
           const isGenerating = generatingId === id;
-          const isSending = sendingId === id;
           const isUpdating = updatingId === id;
           const isMarkingConverted = markingConvertedId === id;
           const isMarkingCold = markingColdId === id;
+          const cardQueueInfo = queueState[id];
+          const isQueued = cardQueueInfo?.status === 'queued';
+          const isActivelySending = cardQueueInfo?.status === 'active' || sendingId === id;
+          const isInQueue = isQueued || isActivelySending;
+          const isQueueFailed = cardQueueInfo?.status === 'failed';
           const isBusy =
-            isGenerating || isSending || isUpdating || isMarkingConverted || isMarkingCold || isUpdateAllRunning;
+            isGenerating || isInQueue || isUpdating || isMarkingConverted || isMarkingCold || isUpdateAllRunning;
           const isSent = sentIds.has(id);
           const updateResult = updateResults[id];
           const fullThread = threads[id];
@@ -556,18 +654,37 @@ export default function RepliesPage() {
                     onClick={() => sendReply(id)}
                     disabled={isBusy || !currentReplyText.trim()}
                   >
-                    {isSending ? (
+                    {isActivelySending ? (
                       <>
                         <span className="bulk-spinner-inline" aria-hidden="true" />
                         Sending…
                       </>
+                    ) : isQueued ? (
+                      'Queued'
                     ) : isSent ? (
-                      "Sent ✓"
+                      'Sent ✓'
                     ) : (
-                      "Send Reply ▸"
+                      'Send Reply ▸'
                     )}
                   </button>
                 </div>
+
+                {isQueueFailed && cardQueueInfo?.error && (
+                  <div className="drafts-card__error drafts-card__error--failed">
+                    <span>{cardQueueInfo.error}</span>
+                    <button
+                      className="btn btn-send btn--sm"
+                      onClick={async () => {
+                        if (cardQueueInfo?.jobId) {
+                          // Re-enqueue the failed job; progress event will update state
+                          await window.api.queue.retry(cardQueueInfo.jobId);
+                        }
+                      }}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Inline Converted confirmation */}

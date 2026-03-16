@@ -6,6 +6,12 @@ interface EditEntry {
   original: string;
 }
 
+interface CardQueueInfo {
+  jobId: string;
+  status: 'queued' | 'active' | 'completed' | 'failed';
+  error?: string;
+}
+
 const PERSONA_LABELS: Record<string, string> = {
   c_level: "C-Level",
   management: "Management",
@@ -37,7 +43,12 @@ export default function DraftsPage() {
   // Per-card action-in-progress (existing)
   const [savingId, setSavingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
-  const [sendingId, setSendingId] = useState<number | null>(null);
+
+  // Per-card queue state: tracks send-initial jobs from the queue engine
+  const [queueState, setQueueState] = useState<Record<number, CardQueueInfo>>({});
+
+  // Aggregate queue progress for the header indicator
+  const [queueProgress, setQueueProgress] = useState<{ active: number; remaining: number } | null>(null);
 
   // Transient "Saved ✓" indicator per card
   const [savedId, setSavedId] = useState<number | null>(null);
@@ -78,6 +89,24 @@ export default function DraftsPage() {
   const [refreshAllState, setRefreshAllState] = useState<{ current: number; total: number } | null>(null);
   const refreshAllCancelledRef = useRef(false);
 
+  // ── Phase 8: Bulk selection ────────────────────────────────────────────────
+
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+  // Unsaved-edits dialog state for bulk send
+  const [showUnsavedEditsDialog, setShowUnsavedEditsDialog] = useState(false);
+  const [unsavedEditIds, setUnsavedEditIds] = useState<number[]>([]);
+  const [bulkSendReadyIds, setBulkSendReadyIds] = useState<number[]>([]);
+
+  // Bulk delete confirmation dialog
+  const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false);
+
+  // Cards highlighted after "Cancel and review" in unsaved-edits dialog
+  const [highlightedUnsavedIds, setHighlightedUnsavedIds] = useState<Set<number>>(new Set());
+
+  // Ref for the Select All checkbox so we can set indeterminate state
+  const selectAllRef = useRef<HTMLInputElement | null>(null);
+
   // ── Data fetching ──────────────────────────────────────────────────────────
 
   const fetchLeads = useCallback(async () => {
@@ -108,7 +137,138 @@ export default function DraftsPage() {
     fetchLeads();
   }, [fetchLeads]);
 
-  // ── Edit helpers ────────────────────────────────────────────────────────────
+  // ── Queue progress subscription ─────────────────────────────────────────────
+
+  const progressHandlerRef = useRef<QueueProgressHandler | null>(null);
+
+  useEffect(() => {
+    // Helper to rebuild queueState from a snapshot of queue items
+    function buildQueueStateFromItems(items: QueueItemStatus[]): Record<number, CardQueueInfo> {
+      const state: Record<number, CardQueueInfo> = {};
+      for (const item of items) {
+        if (item.type !== 'send-initial') continue;
+        const leadId = item.payload.leadId as number | undefined;
+        if (leadId === undefined) continue;
+        if (item.status === 'queued' || item.status === 'active' || item.status === 'failed') {
+          state[leadId] = {
+            jobId: item.id,
+            status: item.status,
+            error: item.error,
+          };
+        }
+      }
+      return state;
+    }
+
+    function updateQueueProgress(state: Record<number, CardQueueInfo>) {
+      const values = Object.values(state);
+      const active = values.filter((v) => v.status === 'active').length;
+      const remaining = values.filter((v) => v.status === 'queued' || v.status === 'active').length;
+      setQueueProgress(remaining > 0 ? { active, remaining } : null);
+    }
+
+    // Sync with any jobs already in the queue on mount
+    window.api.queue.getStatus().then((snapshot) => {
+      const allItems = [...snapshot.actionQueue];
+      const initialState = buildQueueStateFromItems(allItems);
+      setQueueState(initialState);
+      updateQueueProgress(initialState);
+    });
+
+    const handler = window.api.queue.onProgress((item) => {
+      if (item.type !== 'send-initial') return;
+      const leadId = item.payload.leadId as number | undefined;
+      if (leadId === undefined) return;
+
+      if (item.status === 'completed') {
+        // Lead has transitioned to contacted — remove from drafts list
+        setLeads((prev) => prev.filter((l) => l.id !== leadId));
+        setEditState((prev) => {
+          const n = { ...prev };
+          delete n[leadId];
+          return n;
+        });
+        setQueueState((prev) => {
+          const n = { ...prev };
+          delete n[leadId];
+          updateQueueProgress(n);
+          return n;
+        });
+      } else if (item.status === 'cancelled') {
+        setQueueState((prev) => {
+          const n = { ...prev };
+          delete n[leadId];
+          updateQueueProgress(n);
+          return n;
+        });
+      } else {
+        // queued, active, or failed
+        setQueueState((prev) => {
+          const n = {
+            ...prev,
+            [leadId]: {
+              jobId: item.id,
+              status: item.status as CardQueueInfo['status'],
+              error: item.error,
+            },
+          };
+          updateQueueProgress(n);
+          return n;
+        });
+      }
+    });
+
+    progressHandlerRef.current = handler;
+
+    return () => {
+      if (progressHandlerRef.current) {
+        window.api.queue.removeProgressListener(progressHandlerRef.current);
+        progressHandlerRef.current = null;
+      }
+    };
+  }, []);
+
+  // Prune selectedIds when the leads list changes (filter/refresh/deletion)
+  useEffect(() => {
+    if (selectedIds.size === 0) return;
+    const leadIdSet = new Set(leads.map((l) => l.id));
+    setSelectedIds((prev) => {
+      const pruned = new Set([...prev].filter((id) => leadIdSet.has(id)));
+      return pruned.size === prev.size ? prev : pruned;
+    });
+  }, [leads]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the Select All checkbox indeterminate state in sync
+  useEffect(() => {
+    const el = selectAllRef.current;
+    if (!el) return;
+    el.indeterminate = selectedIds.size > 0 && selectedIds.size < leads.length;
+  }, [selectedIds, leads]);
+
+  // ── Bulk selection helpers ─────────────────────────────────────────────────
+
+  function toggleSelect(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+    // Clicking a card clears its unsaved highlight
+    setHighlightedUnsavedIds((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    if (selectedIds.size === leads.length && leads.length > 0) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(leads.map((l) => l.id)));
+    }
+  }
 
   function handleTextChange(id: number, value: string) {
     setEditState((prev) => ({
@@ -215,7 +375,6 @@ export default function DraftsPage() {
 
   async function sendLead(id: number) {
     setConfirmSendId(null);
-    setSendingId(id);
     clearCardError(id);
 
     const entry = editState[id];
@@ -223,24 +382,131 @@ export default function DraftsPage() {
 
     try {
       const result = await window.api.sendLead(id, currentText);
-      if (!result.success) {
+      if ('queued' in result && result.queued) {
+        setQueueState((prev) => ({
+          ...prev,
+          [id]: { jobId: result.jobId, status: 'queued' },
+        }));
+      } else if ('success' in result && result.success === false) {
         let msg = result.error;
-        if ("needsLogin" in result && result.needsLogin) {
+        if ('needsLogin' in result && result.needsLogin) {
           msg = "Your LinkedIn session has expired. Please log in again via the Compose page.";
         }
         setCardError(id, msg);
-        return;
       }
-      setLeads((prev) => prev.filter((l) => l.id !== id));
-      setEditState((prev) => {
-        const n = { ...prev };
-        delete n[id];
-        return n;
-      });
     } catch (err) {
       setCardError(id, err instanceof Error ? err.message : "Failed to send message.");
-    } finally {
-      setSendingId(null);
+    }
+  }
+
+  async function handleCancelQueuedSend(id: number) {
+    const info = queueState[id];
+    if (!info) return;
+    await window.api.queue.cancel(info.jobId);
+    // Optimistic removal — the cancelled progress event will also clean up,
+    // but we remove immediately so the card returns to idle state right away.
+    setQueueState((prev) => {
+      const n = { ...prev };
+      delete n[id];
+      return n;
+    });
+  }
+
+  async function retrySend(id: number) {
+    const cardQueue = queueState[id];
+    if (!cardQueue?.jobId) return;
+    // Re-enqueue the failed job; the progress event from the new queued job
+    // will update queueState[id] automatically.
+    await window.api.queue.retry(cardQueue.jobId);
+  }
+
+  // ── Bulk send ───────────────────────────────────────────────────────────────
+
+  async function handleBulkSend() {
+    const ids = [...selectedIds];
+    const validIds: number[] = [];
+
+    for (const id of ids) {
+      const lead = leads.find((l) => l.id === id);
+      if (!lead) continue;
+
+      const entry = editState[id];
+      const message = entry?.edited?.trim() || lead.initial_message?.trim() || '';
+
+      if (!message) {
+        setCardError(id, 'No message to send.');
+        continue;
+      }
+      if (!lead.profile.linkedin_url) {
+        setCardError(id, 'No LinkedIn URL found.');
+        continue;
+      }
+      const cardQueue = queueState[id];
+      if (cardQueue?.status === 'queued' || cardQueue?.status === 'active') {
+        continue;
+      }
+      validIds.push(id);
+    }
+
+    if (validIds.length === 0) return;
+
+    const withUnsavedEdits = validIds.filter((id) => {
+      const entry = editState[id];
+      return entry && entry.edited !== entry.original;
+    });
+
+    if (withUnsavedEdits.length > 0) {
+      setUnsavedEditIds(withUnsavedEdits);
+      setBulkSendReadyIds(validIds);
+      setShowUnsavedEditsDialog(true);
+      return;
+    }
+
+    await executeBulkSend(validIds);
+  }
+
+  async function executeBulkSend(ids: number[]) {
+    setShowUnsavedEditsDialog(false);
+    for (const id of ids) {
+      clearCardError(id);
+      try {
+        const result = await window.api.sendLead(id);
+        if ('queued' in result && result.queued) {
+          setQueueState((prev) => ({
+            ...prev,
+            [id]: { jobId: result.jobId, status: 'queued' },
+          }));
+        } else if ('success' in result && result.success === false) {
+          let msg = result.error;
+          if ('needsLogin' in result && result.needsLogin) {
+            msg = 'Your LinkedIn session has expired. Please log in again via the Compose page.';
+          }
+          setCardError(id, msg);
+        }
+      } catch (err) {
+        setCardError(id, err instanceof Error ? err.message : 'Failed to send message.');
+      }
+    }
+    setSelectedIds(new Set());
+  }
+
+  // ── Bulk delete ─────────────────────────────────────────────────────────────
+
+  async function executeBulkDelete() {
+    setShowBulkDeleteDialog(false);
+    const ids = [...selectedIds];
+    try {
+      await window.api.deleteLeads(ids);
+      const idSet = new Set(ids);
+      setLeads((prev) => prev.filter((l) => !idSet.has(l.id)));
+      setEditState((prev) => {
+        const n = { ...prev };
+        for (const id of ids) delete n[id];
+        return n;
+      });
+      setSelectedIds(new Set());
+    } catch (err) {
+      console.error('Bulk delete failed:', err);
     }
   }
 
@@ -387,13 +653,32 @@ export default function DraftsPage() {
       {/* Page header */}
       <div className="drafts-header">
         <div className="drafts-header__top">
-          <h2 className="drafts-title">
-            Drafts
+          <div className="drafts-title-row">
             {leads.length > 0 && (
-              <span className="drafts-count-badge">{leads.length}</span>
+              <input
+                ref={selectAllRef}
+                type="checkbox"
+                className="drafts-header__select-all"
+                checked={leads.length > 0 && selectedIds.size === leads.length}
+                onChange={toggleSelectAll}
+                aria-label="Select all drafts"
+              />
             )}
-          </h2>
+            <h2 className="drafts-title">
+              Drafts
+              {leads.length > 0 && (
+                <span className="drafts-count-badge">{leads.length}</span>
+              )}
+            </h2>
+          </div>
           <div className="drafts-header__actions">
+            {queueProgress && queueProgress.remaining > 0 && (
+              <span className="drafts-queue-progress">
+                {queueProgress.active > 0
+                  ? `Sending 1 of ${queueProgress.remaining}…`
+                  : `${queueProgress.remaining} queued…`}
+              </span>
+            )}
             {isRefreshingAll && (
               <span className="drafts-refresh-all-progress">
                 Refreshing {refreshAllState.current} / {refreshAllState.total}…
@@ -430,6 +715,51 @@ export default function DraftsPage() {
         </div>
       )}
 
+      {/* Bulk delete confirmation dialog */}
+      {showBulkDeleteDialog && (
+        <div className="bulk-dialog-overlay">
+          <div className="bulk-dialog">
+            <p className="bulk-dialog__message">
+              Delete {selectedIds.size} draft{selectedIds.size !== 1 ? 's' : ''}? This cannot be undone.
+            </p>
+            <div className="bulk-dialog__actions">
+              <button className="btn btn-delete" onClick={executeBulkDelete}>
+                Delete
+              </button>
+              <button className="btn btn-secondary" onClick={() => setShowBulkDeleteDialog(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Unsaved edits dialog for bulk send */}
+      {showUnsavedEditsDialog && (
+        <div className="bulk-dialog-overlay">
+          <div className="bulk-dialog">
+            <p className="bulk-dialog__message">
+              {unsavedEditIds.length} selected draft{unsavedEditIds.length !== 1 ? 's have' : ' has'} unsaved edits.
+              What would you like to do?
+            </p>
+            <div className="bulk-dialog__actions">
+              <button className="btn btn-send" onClick={() => executeBulkSend(bulkSendReadyIds)}>
+                Send saved versions
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={() => {
+                  setShowUnsavedEditsDialog(false);
+                  setHighlightedUnsavedIds(new Set(unsavedEditIds));
+                }}
+              >
+                Cancel and review
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Card list */}
       <div className="drafts-card-list">
         {leads.map((lead) => {
@@ -438,14 +768,18 @@ export default function DraftsPage() {
           const isDirty = entry ? entry.edited !== entry.original : false;
           const isSaving = savingId === id;
           const isDeleting = deletingId === id;
-          const isSending = sendingId === id;
+          const cardQueue = queueState[id];
+          const isQueued = cardQueue?.status === 'queued';
+          const isActivelySending = cardQueue?.status === 'active';
+          const isFailed = cardQueue?.status === 'failed';
+          const isInQueue = isQueued || isActivelySending;
           const isRegenerating = regeneratingId === id;
           const isRefreshingProfile = refreshingProfileId === id;
           const isRefreshingBothCard = refreshingBothId === id;
           const isBusy =
             isSaving ||
             isDeleting ||
-            isSending ||
+            isInQueue ||
             isRegenerating ||
             isRefreshingProfile ||
             isRefreshingBothCard;
@@ -456,10 +790,30 @@ export default function DraftsPage() {
           const isMoreOpen = moreOpenIds.has(id);
           const customInstruction = customInstructions[id] ?? "";
 
+          // CSS modifier class for the card based on queue state and selection
+          const isSelected = selectedIds.has(id);
+          const isUnsavedHighlighted = highlightedUnsavedIds.has(id);
+          const cardQueueClass = isActivelySending
+            ? " drafts-card--sending"
+            : isQueued
+            ? " drafts-card--queued"
+            : isFailed
+            ? " drafts-card--failed"
+            : "";
+          const cardSelectedClass = isSelected ? " drafts-card--selected" : "";
+          const cardHighlightClass = isUnsavedHighlighted ? " drafts-card--unsaved-highlight" : "";
+
           return (
-            <div key={id} className="drafts-card">
+            <div key={id} className={`drafts-card${cardQueueClass}${cardSelectedClass}${cardHighlightClass}`}>
               {/* Card header */}
               <div className="drafts-card__header">
+                <input
+                  type="checkbox"
+                  className="drafts-card__checkbox"
+                  checked={isSelected}
+                  onChange={() => toggleSelect(id)}
+                  aria-label={`Select ${name}`}
+                />
                 <div className="drafts-card__identity">
                   <a
                     href={lead.profile.linkedin_url}
@@ -625,8 +979,17 @@ export default function DraftsPage() {
                   }}
                   disabled={isBusy}
                 >
-                  {isSending ? "Sending…" : isDirty ? "Save & Send" : "Send ▸"}
+                  {isActivelySending ? "Sending…" : isQueued ? "Queued" : isDirty ? "Save & Send" : "Send ▸"}
                 </button>
+
+                {isQueued && (
+                  <button
+                    className="btn btn-secondary btn--sm"
+                    onClick={() => handleCancelQueuedSend(id)}
+                  >
+                    Cancel
+                  </button>
+                )}
               </div>
 
               {/* More options toggle */}
@@ -758,6 +1121,19 @@ export default function DraftsPage() {
                 </div>
               )}
 
+              {/* Failed send: error with retry button */}
+              {isFailed && cardQueue?.error && (
+                <div className="drafts-card__error drafts-card__error--failed">
+                  <span>{cardQueue.error}</span>
+                  <button
+                    className="btn btn-send btn--sm"
+                    onClick={() => retrySend(id)}
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+
               {/* Per-card inline error */}
               {cardError && (
                 <div className="drafts-card__error">
@@ -768,6 +1144,22 @@ export default function DraftsPage() {
           );
         })}
       </div>
+
+      {/* Sticky bulk action bar — visible when 1+ cards are selected */}
+      {selectedIds.size > 0 && (
+        <div className="bulk-action-bar">
+          <span className="bulk-action-bar__count">{selectedIds.size} selected</span>
+          <button className="btn bulk-action-bar__send-btn" onClick={handleBulkSend}>
+            Send Selected ({selectedIds.size})
+          </button>
+          <button className="btn bulk-action-bar__delete-btn" onClick={() => setShowBulkDeleteDialog(true)}>
+            Delete Selected ({selectedIds.size})
+          </button>
+          <button className="bulk-action-bar__deselect" onClick={() => setSelectedIds(new Set())}>
+            Deselect All
+          </button>
+        </div>
+      )}
     </div>
   );
 }
