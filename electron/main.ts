@@ -7,6 +7,7 @@ import { registerLoginHandlers } from './ipc/login.ipc'
 import { registerSenderConfigHandlers } from './ipc/sender-config.ipc'
 import { registerLeadHandlers } from './ipc/lead.ipc'
 import { registerQueueHandlers } from './ipc/queue.ipc'
+import { registerUiHandlers } from './ipc/ui.ipc'
 import { IPC } from '../src/shared/ipc-channels'
 import { findChromePath } from '../src/backend/chrome-finder'
 import { buildAppMenu } from './menu'
@@ -39,6 +40,17 @@ if (!gotLock) {
       height: savedState?.height ?? DEFAULT_HEIGHT,
       x: savedState?.x,
       y: savedState?.y,
+      minWidth: 1000,
+      minHeight: 600,
+      ...(process.platform === 'darwin'
+        ? { titleBarStyle: 'hiddenInset' as const }
+        : {
+            titleBarOverlay: {
+              color: '#1e1e2e',
+              symbolColor: '#e2e4e9',
+              height: 36,
+            },
+          }),
       webPreferences: {
         preload,
         sandbox: false
@@ -121,6 +133,7 @@ if (!gotLock) {
     registerLoginHandlers()
     registerSenderConfigHandlers()
     registerLeadHandlers()
+    registerUiHandlers()
 
     ipcMain.handle(IPC.OPEN_LOGS_FOLDER, async () => {
       await shell.openPath(getLogsDir())

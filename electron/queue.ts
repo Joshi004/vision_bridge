@@ -33,6 +33,7 @@ export interface QueueItem {
   result?: unknown
   error?: string
   createdAt: number
+  startedAt?: number
   completedAt?: number
 }
 
@@ -63,6 +64,7 @@ const ACTION_JOB_TYPES: ReadonlySet<JobType> = new Set([
 ])
 
 const MAX_QUEUE_SIZE = 100
+const MAX_HISTORY = 50
 const ACTION_DELAY_MIN_MS = 3000
 const ACTION_DELAY_MAX_MS = 10000
 const DATA_DELAY_MIN_MS = 1000
@@ -79,7 +81,7 @@ let processing = false
 const pendingResolvers = new Map<string, { resolve: (result: unknown) => void; reject: (err: Error) => void }>()
 
 // Job handler registry
-type JobHandler = (payload: Record<string, unknown>) => Promise<unknown>
+type JobHandler = (payload: Record<string, unknown>, jobId: string) => Promise<unknown>
 const jobHandlers = new Map<JobType, JobHandler>()
 
 // ─── Public EventEmitter ──────────────────────────────────────────────────────
@@ -107,6 +109,18 @@ function emitStatusChange(item: QueueItem): void {
   queueEvents.emit('job-status-change', item)
 }
 
+function trimHistory(arr: QueueItem[]): void {
+  const terminal = arr.filter(
+    (j) => j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled'
+  )
+  if (terminal.length <= MAX_HISTORY) return
+  const excess = terminal.slice(0, terminal.length - MAX_HISTORY)
+  for (const item of excess) {
+    const idx = arr.indexOf(item)
+    if (idx !== -1) arr.splice(idx, 1)
+  }
+}
+
 // ─── Executor ─────────────────────────────────────────────────────────────────
 
 async function processNext(): Promise<void> {
@@ -122,6 +136,7 @@ async function processNext(): Promise<void> {
   processing = true
   const prevQueue: QueueName = nextItem.queue
   nextItem.status = 'active'
+  nextItem.startedAt = Date.now()
   emitStatusChange(nextItem)
 
   const handler = jobHandlers.get(nextItem.type)
@@ -138,7 +153,7 @@ async function processNext(): Promise<void> {
     }
   } else {
     try {
-      const result = await handler(nextItem.payload)
+      const result = await handler(nextItem.payload, nextItem.id)
       nextItem.status = 'completed'
       nextItem.result = result
       nextItem.completedAt = Date.now()
@@ -179,6 +194,7 @@ async function processNext(): Promise<void> {
     const failed = prevArray.filter((j) => j.status === 'failed').length
     const drainInfo: QueueDrainedInfo = { queue: prevQueue, completed, failed }
     queueEvents.emit('queue-drained', drainInfo)
+    trimHistory(prevArray)
   }
 
   // Delay before picking up the next job
@@ -330,7 +346,7 @@ export function retryJob(jobId: string): { success: boolean; newJobId?: string; 
 
 // ─── Send Job Handlers ────────────────────────────────────────────────────────
 
-registerJobHandler('send-initial', async (payload) => {
+registerJobHandler('send-initial', async (payload, _jobId) => {
   const leadId = payload.leadId as number
   const linkedinUrl = payload.linkedinUrl as string
   const messageText = payload.messageText as string
@@ -359,7 +375,7 @@ registerJobHandler('send-initial', async (payload) => {
   log.info('queue', `Lead ${leadId} sent and transitioned to contacted`)
 })
 
-registerJobHandler('send-followup', async (payload) => {
+registerJobHandler('send-followup', async (payload, _jobId) => {
   const leadId = payload.leadId as number
   const linkedinUrl = payload.linkedinUrl as string
   const messageText = payload.messageText as string
@@ -373,7 +389,7 @@ registerJobHandler('send-followup', async (payload) => {
   log.info('queue', `Follow-up (${followUpType}) sent for lead ${leadId}`)
 })
 
-registerJobHandler('send-reply', async (payload) => {
+registerJobHandler('send-reply', async (payload, _jobId) => {
   const leadId = payload.leadId as number
   const linkedinUrl = payload.linkedinUrl as string
   const messageText = payload.messageText as string

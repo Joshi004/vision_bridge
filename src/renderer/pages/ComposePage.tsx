@@ -1,5 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
+import { Check, X, Ban, ArrowRight, Minus, Circle } from "lucide-react";
+import ActivityFeed from "../components/ActivityFeed";
+import { useBottomPanel } from "../components/BottomPanel";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -63,13 +66,6 @@ function duplicateMessage(stage: string): string {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface LogEntry {
-  level: "INFO" | "DEBUG" | "ERROR";
-  component: string;
-  message: string;
-  timestamp: string;
-}
-
 interface UrlItemStatus {
   url: string;
   status: "pending" | "processing" | "done" | "skipped" | "error" | "cancelled";
@@ -82,300 +78,45 @@ type SinglePageState = "idle" | "loading" | "success" | "error";
 type BulkRunState = "idle" | "running" | "done";
 type Mode = "single" | "bulk";
 
-// ─── Section A: Sender Configuration ─────────────────────────────────────────
-
-function SenderConfigSection({ onSaved }: { onSaved?: () => void }) {
-  const [isExpanded, setIsExpanded] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
-  const [fields, setFields] = useState<SenderConfig>({
-    sender_name: "",
-    company_name: "",
-    company_description: "",
-    sender_role: "",
-    outreach_goal: "",
-    message_tone: "",
-    message_rules: "",
-  });
-
-  useEffect(() => {
-    window.api.getSenderConfig().then((result) => {
-      if ("success" in result && result.success) {
-        setFields(result.config);
-        if (result.config.company_name) {
-          setIsExpanded(false);
-        }
-      }
-    });
-  }, []);
-
-  function handleFieldChange(key: keyof SenderConfig, value: string) {
-    setFields((prev) => ({ ...prev, [key]: value }));
-  }
-
-  async function handleSave() {
-    setIsSaving(true);
-    try {
-      const result = await window.api.saveSenderConfig(fields);
-      if ("success" in result && result.success) {
-        setFields(result.config);
-      }
-      setSaveSuccess(true);
-      setTimeout(() => {
-        setSaveSuccess(false);
-        setIsExpanded(false);
-        onSaved?.();
-      }, 1500);
-    } catch {
-      // save failed silently — user can retry
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  const summaryName = fields.sender_name || "You";
-  const summaryCompany = fields.company_name || "your company";
-
-  return (
-    <div className={`sender-config${isExpanded ? "" : " sender-config--collapsed"}`}>
-      {isExpanded ? (
-        <>
-          <div className="sender-config__header">
-            <span className="sender-config__header-title">Sender Configuration</span>
-            {fields.company_name && (
-              <button
-                className="sender-config__toggle"
-                onClick={() => setIsExpanded(false)}
-              >
-                Collapse
-              </button>
-            )}
-          </div>
-
-          <div className="sender-config__form">
-            <div className="sender-config__row sender-config__row--two-col">
-              <div className="sender-config__field">
-                <label className="form-label">Your Name</label>
-                <input
-                  type="text"
-                  className="sender-config__input"
-                  placeholder="e.g. Naresh Joshi"
-                  value={fields.sender_name}
-                  onChange={(e) => handleFieldChange("sender_name", e.target.value)}
-                />
-              </div>
-              <div className="sender-config__field">
-                <label className="form-label">Company</label>
-                <input
-                  type="text"
-                  className="sender-config__input"
-                  placeholder="e.g. Techsergy"
-                  value={fields.company_name}
-                  onChange={(e) => handleFieldChange("company_name", e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="sender-config__field">
-              <label className="form-label">What You Do</label>
-              <textarea
-                className="sender-config__textarea"
-                rows={3}
-                placeholder="A software delivery company that supports startups and product teams…"
-                value={fields.company_description}
-                onChange={(e) => handleFieldChange("company_description", e.target.value)}
-              />
-            </div>
-
-            <div className="sender-config__field">
-              <label className="form-label">Your Role</label>
-              <textarea
-                className="sender-config__textarea"
-                rows={2}
-                placeholder="Senior technical lead. Delivery handled through my team…"
-                value={fields.sender_role}
-                onChange={(e) => handleFieldChange("sender_role", e.target.value)}
-              />
-            </div>
-
-            <div className="sender-config__field">
-              <label className="form-label">Outreach Goal</label>
-              <textarea
-                className="sender-config__textarea"
-                rows={2}
-                placeholder="Explore engineering collaboration opportunities…"
-                value={fields.outreach_goal}
-                onChange={(e) => handleFieldChange("outreach_goal", e.target.value)}
-              />
-            </div>
-
-            <div className="sender-config__row sender-config__row--two-col">
-              <div className="sender-config__field">
-                <label className="form-label">Message Tone</label>
-                <textarea
-                  className="sender-config__textarea"
-                  rows={2}
-                  placeholder="Friendly and natural. Sound like a real human…"
-                  value={fields.message_tone}
-                  onChange={(e) => handleFieldChange("message_tone", e.target.value)}
-                />
-              </div>
-              <div className="sender-config__field">
-                <label className="form-label">Message Rules</label>
-                <textarea
-                  className="sender-config__textarea"
-                  rows={2}
-                  placeholder="No em dashes, no bullet points. Reference their profile genuinely…"
-                  value={fields.message_rules}
-                  onChange={(e) => handleFieldChange("message_rules", e.target.value)}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="sender-config__footer">
-            <button
-              className="btn btn-primary"
-              onClick={handleSave}
-              disabled={isSaving}
-            >
-              {isSaving ? "Saving…" : "Save Configuration"}
-            </button>
-            {saveSuccess && (
-              <span className="sender-config__save-status">
-                ✓ Saved
-              </span>
-            )}
-          </div>
-        </>
-      ) : (
-        <div className="sender-config__summary">
-          <span className="sender-config__summary-text">
-            Sending as <strong>{summaryName}</strong> from <strong>{summaryCompany}</strong>
-          </span>
-          <button
-            className="sender-config__toggle"
-            onClick={() => setIsExpanded(true)}
-          >
-            Edit
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Section A½: Prompt Preview ──────────────────────────────────────────────
-
-function PromptPreviewSection({ refreshKey }: { refreshKey: number }) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [variant, setVariant] = useState<"cold" | "referral">("cold");
-  const [prompt, setPrompt] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!isExpanded) return;
-    setIsLoading(true);
-    setError(null);
-    setPrompt(null);
-    const call = variant === "referral"
-      ? window.api.getPromptPreviewWithReferral()
-      : window.api.getPromptPreview();
-    call.then((result) => {
-      if ("success" in result && result.success) {
-        setPrompt(result.prompt);
-      } else if ("error" in result) {
-        setError(result.message);
-      }
-    }).finally(() => {
-      setIsLoading(false);
-    });
-  }, [isExpanded, variant, refreshKey]);
-
-  return (
-    <div className="prompt-preview">
-      <button
-        className="prompt-preview__toggle"
-        onClick={() => setIsExpanded((v) => !v)}
-        aria-expanded={isExpanded}
-      >
-        <span className="prompt-preview__toggle-icon">{isExpanded ? "▾" : "▸"}</span>
-        <span className="prompt-preview__toggle-label">Sample Prompt</span>
-        <span className="prompt-preview__toggle-hint">
-          Preview the prompt that will be sent to the model
-        </span>
-      </button>
-
-      {isExpanded && (
-        <div className="prompt-preview__body">
-          <div className="prompt-preview__variant-tabs">
-            <button
-              className={`prompt-preview__variant-tab${variant === "cold" ? " prompt-preview__variant-tab--active" : ""}`}
-              onClick={() => setVariant("cold")}
-            >
-              Cold Outreach
-            </button>
-            <button
-              className={`prompt-preview__variant-tab${variant === "referral" ? " prompt-preview__variant-tab--active" : ""}`}
-              onClick={() => setVariant("referral")}
-            >
-              Referral Conversation
-            </button>
-          </div>
-          {isLoading && (
-            <div className="prompt-preview__loading">Loading prompt…</div>
-          )}
-          {error && (
-            <div className="prompt-preview__error">{error}</div>
-          )}
-          {!isLoading && !error && prompt && (
-            <pre className="prompt-preview__text">{prompt}</pre>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Section B: Single Profile Mode ──────────────────────────────────────────
+// ─── Single Profile Mode ──────────────────────────────────────────────────────
 
 function SingleMode() {
+  const { openPanel } = useBottomPanel();
   const [state, setState] = useState<SinglePageState>("idle");
   const [url, setUrl] = useState("");
   const [forceScrape, setForceScrape] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [duplicateInfo, setDuplicateInfo] = useState<DuplicateCheckResult["lead"] | null>(null);
-  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
-  const [logsExpanded, setLogsExpanded] = useState(true);
+  const [activitySteps, setActivitySteps] = useState<ActivityStep[]>([]);
   const [createdLeadName, setCreatedLeadName] = useState<string | null>(null);
 
-  const logHandlerRef = useRef<ReturnType<typeof window.api.onScrapeLog> | null>(null);
+  const activityHandlerRef = useRef<ReturnType<typeof window.api.onActivityStep> | null>(null);
   const pendingUrlRef = useRef<string | null>(null);
   const pendingForceRef = useRef<boolean>(false);
-  const logEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (state === "loading") {
-      setLogEntries([]);
-      const handler = window.api.onScrapeLog((entry) => {
-        setLogEntries((prev) => [...prev, entry as LogEntry]);
+      setActivitySteps([]);
+      const handler = window.api.onActivityStep((step) => {
+        setActivitySteps((prev) => {
+          const idx = prev.findIndex(s => s.stepId === step.stepId);
+          if (idx >= 0) {
+            const next = [...prev];
+            next[idx] = step as ActivityStep;
+            return next;
+          }
+          return [...prev, step as ActivityStep];
+        });
       });
-      logHandlerRef.current = handler;
+      activityHandlerRef.current = handler;
     } else {
-      if (logHandlerRef.current) {
-        window.api.offScrapeLog(logHandlerRef.current);
-        logHandlerRef.current = null;
+      if (activityHandlerRef.current) {
+        window.api.offActivityStep(activityHandlerRef.current);
+        activityHandlerRef.current = null;
       }
     }
   }, [state]);
-
-  useEffect(() => {
-    if (logsExpanded && logEndRef.current) {
-      logEndRef.current.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [logEntries, logsExpanded]);
 
   async function processUrl(targetUrl: string, force: boolean) {
     setState("loading");
@@ -453,146 +194,130 @@ function SingleMode() {
     setError(null);
     setNeedsLogin(false);
     setDuplicateInfo(null);
-    setLogEntries([]);
+    setActivitySteps([]);
     setCreatedLeadName(null);
   }
 
   const isLoading = state === "loading";
 
   return (
-    <>
-      {error && (
-        <div className="error-banner">
-          <strong>Error:</strong> {error}
-        </div>
-      )}
-
-      {needsLogin && (
-        <div className="login-prompt">
-          <div className="login-prompt__text">
-            <strong>LinkedIn login required.</strong> Your session is missing or has expired.
-          </div>
-          <button className="btn btn-login" onClick={handleLogin}>
-            Login to LinkedIn
-          </button>
-        </div>
-      )}
-
-      {duplicateInfo && (
-        <div className="duplicate-banner">
-          <div className="duplicate-banner__message">
-            {duplicateMessage(duplicateInfo.stage)}
-          </div>
-          {duplicateInfo.stage.toLowerCase() !== "converted" && (
-            <Link to={stageToRoute(duplicateInfo.stage)} className="duplicate-banner__link">
-              {stageLinkLabel(duplicateInfo.stage)} →
-            </Link>
-          )}
-        </div>
-      )}
-
-      {state === "success" ? (
-        <div className="success-banner">
-          <span className="success-banner__icon">✓</span>
-          <span className="success-banner__text">
-            Lead{createdLeadName ? ` for ${createdLeadName}` : ""} created successfully.
-          </span>
-          <div className="success-banner__actions">
-            <Link to="/drafts" className="btn btn-primary btn-sm">
-              Go to Drafts to review
-            </Link>
-            <button className="btn btn-secondary btn-sm" onClick={handleReset}>
-              Add Another
-            </button>
-          </div>
-        </div>
-      ) : (
-        <form className="scrape-form" onSubmit={handleSubmit}>
-          <label htmlFor="compose-url-input" className="form-label">
-            LinkedIn Profile URL
-          </label>
-          <div className="input-row">
-            <input
-              id="compose-url-input"
-              type="url"
-              className="url-input"
-              placeholder="https://www.linkedin.com/in/username/"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              disabled={isLoading}
-              required
-            />
-            <button
-              type="submit"
-              className="btn btn-primary"
-              disabled={isLoading || url.trim() === ""}
-            >
-              {isLoading ? "Processing…" : "Go"}
-            </button>
-          </div>
-          <div className="force-scrape-row">
-            <label className="force-scrape-label">
-              <input
-                type="checkbox"
-                checked={forceScrape}
-                onChange={(e) => setForceScrape(e.target.checked)}
-                disabled={isLoading}
-              />
-              Force re-scrape
-            </label>
-            <span className="force-scrape-hint">
-              {forceScrape
-                ? "Will re-scrape LinkedIn even if cached data exists."
-                : "Cached data (up to 3 days old) will be used if available."}
-            </span>
-          </div>
-          {isLoading && (
-            <p className="loading-hint">
-              Scraping profile and generating outreach message — this may take 30–90 seconds.
-            </p>
-          )}
-        </form>
-      )}
-
-      {(isLoading || (state !== "success" && logEntries.length > 0)) && (
-        <div className="diag-log-panel">
-          <button
-            className="diag-log-toggle"
-            onClick={() => setLogsExpanded((v) => !v)}
-            aria-expanded={logsExpanded}
-          >
-            <span className="diag-log-toggle-icon">{logsExpanded ? "▾" : "▸"}</span>
-            Diagnostic Logs
-            <span className="diag-log-count">{logEntries.length}</span>
-            {!isLoading && (
-              <button
-                className="btn-open-logs"
-                onClick={(e) => { e.stopPropagation(); window.api.openLogsFolder(); }}
-              >
-                Open Logs Folder
-              </button>
-            )}
-          </button>
-          {logsExpanded && (
-            <div className="diag-log-scroll">
-              {logEntries.map((entry, i) => (
-                <div key={i} className={`diag-log-line diag-log-${entry.level.toLowerCase()}`}>
-                  <span className="diag-log-time">{entry.timestamp.slice(11, 23)}</span>
-                  <span className="diag-log-level">{entry.level}</span>
-                  <span className="diag-log-component">[{entry.component}]</span>
-                  <span className="diag-log-msg">{entry.message}</span>
-                </div>
-              ))}
-              <div ref={logEndRef} />
+    <div className="compose-workspace compose-workspace--single">
+      {/* Left: input area */}
+      <div className="compose-workspace__input">
+        {needsLogin && (
+          <div className="login-prompt">
+            <div className="login-prompt__text">
+              <strong>LinkedIn login required.</strong> Your session is missing or has expired.
             </div>
-          )}
-        </div>
-      )}
-    </>
+            <button className="btn btn-login" onClick={handleLogin}>
+              Login to LinkedIn
+            </button>
+          </div>
+        )}
+
+        {state !== "success" && (
+          <form className="scrape-form compose-spotlight-form" onSubmit={handleSubmit}>
+            <div className="compose-spotlight-input-wrap">
+              <input
+                id="compose-url-input"
+                type="url"
+                className="compose-spotlight-input"
+                placeholder="Paste a LinkedIn profile URL…"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                disabled={isLoading}
+                required
+                autoFocus
+              />
+              <button
+                type="submit"
+                className="compose-spotlight-btn btn btn-primary"
+                disabled={isLoading || url.trim() === ""}
+              >
+                {isLoading ? "Processing…" : "Go"}
+              </button>
+            </div>
+            <div className="force-scrape-row">
+              <label className="force-scrape-label">
+                <input
+                  type="checkbox"
+                  checked={forceScrape}
+                  onChange={(e) => setForceScrape(e.target.checked)}
+                  disabled={isLoading}
+                />
+                Force re-scrape
+              </label>
+              <span className="force-scrape-hint">
+                {forceScrape
+                  ? "Will re-scrape LinkedIn even if cached data exists."
+                  : "Cached data (up to 3 days old) will be used if available."}
+              </span>
+            </div>
+            {isLoading && (
+              <p className="loading-hint">
+                Scraping profile and generating outreach message — this may take 30–90 seconds.
+              </p>
+            )}
+          </form>
+        )}
+      </div>
+
+      {/* Right: result area */}
+      <div className="compose-workspace__result">
+        {error && (
+          <div className="error-banner">
+            <strong>Error:</strong> {error}
+          </div>
+        )}
+
+        {duplicateInfo && (
+          <div className="duplicate-banner">
+            <div className="duplicate-banner__message">
+              {duplicateMessage(duplicateInfo.stage)}
+            </div>
+            {duplicateInfo.stage.toLowerCase() !== "converted" && (
+              <Link
+                to={stageToRoute(duplicateInfo.stage)}
+                className="duplicate-banner__link"
+                className="btn-icon"
+              >
+                {stageLinkLabel(duplicateInfo.stage)} <ArrowRight size={14} />
+              </Link>
+            )}
+          </div>
+        )}
+
+        {state === "success" && (
+          <div className="success-banner">
+            <span className="success-banner__icon">
+              <Check size={16} />
+            </span>
+            <span className="success-banner__text">
+              Lead{createdLeadName ? ` for ${createdLeadName}` : ""} created successfully.
+            </span>
+            <div className="success-banner__actions">
+              <Link to="/drafts" className="btn btn-primary btn--sm">
+                Go to Drafts to review
+              </Link>
+              <button className="btn btn-secondary btn--sm" onClick={handleReset}>
+                Add Another
+              </button>
+            </div>
+          </div>
+        )}
+
+        {(isLoading || activitySteps.length > 0) && (
+          <ActivityFeed
+            steps={activitySteps}
+            onViewLogs={() => openPanel("logs")}
+          />
+        )}
+      </div>
+    </div>
   );
 }
 
-// ─── Section C: Bulk Profile Mode ────────────────────────────────────────────
+// ─── Bulk Profile Mode ────────────────────────────────────────────────────────
 
 function BulkMode() {
   const navigate = useNavigate();
@@ -602,8 +327,7 @@ function BulkMode() {
   const [error, setError] = useState<string | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [urlItems, setUrlItems] = useState<UrlItemStatus[]>([]);
-  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
-  const [logsExpanded, setLogsExpanded] = useState(false);
+  const [currentStepLabel, setCurrentStepLabel] = useState<string | null>(null);
 
   const [summary, setSummary] = useState<{
     added: number;
@@ -612,8 +336,7 @@ function BulkMode() {
   } | null>(null);
 
   const progressHandlerRef = useRef<ReturnType<typeof window.api.queue.onProgress> | null>(null);
-  const logHandlerRef = useRef<ReturnType<typeof window.api.onScrapeLog> | null>(null);
-  const logEndRef = useRef<HTMLDivElement | null>(null);
+  const activityHandlerRef = useRef<ReturnType<typeof window.api.onActivityStep> | null>(null);
   const urlListEndRef = useRef<HTMLDivElement | null>(null);
 
   const parsedUrls = parseUrlList(rawUrls);
@@ -621,7 +344,6 @@ function BulkMode() {
   const validCount = validUrls.length;
   const invalidCount = parsedUrls.filter((u) => !isLinkedInProfileUrl(u)).length;
 
-  // Subscribe to queue progress events on mount; sync with in-flight jobs.
   useEffect(() => {
     window.api.queue.getStatus().then((snapshot) => {
       const scrapeJobs = snapshot.dataQueue.filter(
@@ -686,15 +408,28 @@ function BulkMode() {
     });
 
     progressHandlerRef.current = handler;
+
+    const activityHandler = window.api.onActivityStep((step) => {
+      if (step.status === "active") {
+        setCurrentStepLabel(step.label);
+      } else if (step.status === "completed" || step.status === "failed") {
+        setCurrentStepLabel(null);
+      }
+    });
+    activityHandlerRef.current = activityHandler;
+
     return () => {
       if (progressHandlerRef.current) {
         window.api.queue.removeProgressListener(progressHandlerRef.current);
         progressHandlerRef.current = null;
       }
+      if (activityHandlerRef.current) {
+        window.api.offActivityStep(activityHandlerRef.current);
+        activityHandlerRef.current = null;
+      }
     };
   }, []);
 
-  // When all items have settled, compute summary and transition to done.
   useEffect(() => {
     if (bulkState !== "running" || urlItems.length === 0) return;
     const allSettled = urlItems.every(
@@ -720,18 +455,8 @@ function BulkMode() {
 
     setSummary({ added, skipped, failed });
     setBulkState("done");
-
-    if (logHandlerRef.current) {
-      window.api.offScrapeLog(logHandlerRef.current);
-      logHandlerRef.current = null;
-    }
+    setCurrentStepLabel(null);
   }, [urlItems, bulkState]);
-
-  useEffect(() => {
-    if (logsExpanded && logEndRef.current) {
-      logEndRef.current.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [logEntries, logsExpanded]);
 
   useEffect(() => {
     if (bulkState === "running" && urlListEndRef.current) {
@@ -743,16 +468,11 @@ function BulkMode() {
     setError(null);
     setNeedsLogin(false);
     setSummary(null);
+    setCurrentStepLabel(null);
 
     const items: UrlItemStatus[] = validUrls.map((u) => ({ url: u, status: "pending" as const }));
     setUrlItems(items);
     setBulkState("running");
-
-    setLogEntries([]);
-    const logHandler = window.api.onScrapeLog((entry) => {
-      setLogEntries((prev) => [...prev, entry as LogEntry]);
-    });
-    logHandlerRef.current = logHandler;
 
     const result = await window.api.scrapeBulk(validUrls, forceScrape);
 
@@ -764,11 +484,7 @@ function BulkMode() {
       }
       setBulkState("idle");
       setUrlItems([]);
-      window.api.offScrapeLog(logHandler);
-      logHandlerRef.current = null;
     }
-    // On success: { success: true, enqueued, invalidUrls }
-    // Progress arrives via the queue progress listener set up in the mount useEffect.
   }
 
   async function handleCancel() {
@@ -783,7 +499,7 @@ function BulkMode() {
     setNeedsLogin(false);
     setUrlItems([]);
     setSummary(null);
-    setLogEntries([]);
+    setCurrentStepLabel(null);
   }
 
   const completedCount = urlItems.filter(
@@ -795,84 +511,37 @@ function BulkMode() {
   ).length;
 
   return (
-    <>
+    <div className="compose-workspace compose-workspace--bulk">
       {error && (
-        <div className="error-banner">
+        <div className="error-banner compose-workspace__full-row">
           <strong>Error:</strong> {error}
         </div>
       )}
 
       {needsLogin && (
-        <div className="login-prompt">
+        <div className="login-prompt compose-workspace__full-row">
           <div className="login-prompt__text">
             <strong>LinkedIn login required.</strong> Your session is missing or has expired.
           </div>
-          <button className="btn btn-login" onClick={async () => {
-            setNeedsLogin(false);
-            setError(null);
-            const result = await window.api.login();
-            if ("error" in result) {
-              setError(result.message);
-            }
-          }}>
+          <button
+            className="btn btn-login"
+            onClick={async () => {
+              setNeedsLogin(false);
+              setError(null);
+              const result = await window.api.login();
+              if ("error" in result) {
+                setError(result.message);
+              }
+            }}
+          >
             Login to LinkedIn
           </button>
         </div>
       )}
 
-      {bulkState === "idle" && (
-        <div className="bulk-form">
-          <label className="form-label">LinkedIn Profile URLs (one per line)</label>
-          <textarea
-            className="bulk-textarea"
-            placeholder={
-              "https://www.linkedin.com/in/person-one/\nhttps://www.linkedin.com/in/person-two/\nhttps://www.linkedin.com/in/person-three/"
-            }
-            value={rawUrls}
-            onChange={(e) => setRawUrls(e.target.value)}
-            rows={8}
-          />
-          {parsedUrls.length > 0 && (
-            <div className="bulk-url-stats">
-              <span className="bulk-url-stat bulk-url-stat--valid">
-                {validCount} valid URL{validCount !== 1 ? "s" : ""}
-              </span>
-              {invalidCount > 0 && (
-                <span className="bulk-url-stat bulk-url-stat--invalid">
-                  {invalidCount} invalid (will be skipped)
-                </span>
-              )}
-            </div>
-          )}
-          <div className="force-scrape-row">
-            <label className="force-scrape-label">
-              <input
-                type="checkbox"
-                checked={forceScrape}
-                onChange={(e) => setForceScrape(e.target.checked)}
-              />
-              Force re-scrape
-            </label>
-            <span className="force-scrape-hint">
-              {forceScrape
-                ? "Will re-scrape LinkedIn even if cached data exists."
-                : "Cached data (up to 3 days old) will be used if available."}
-            </span>
-          </div>
-          <div className="bulk-actions">
-            <button
-              className="btn btn-primary"
-              disabled={validCount === 0}
-              onClick={handleStart}
-            >
-              Process {validCount > 0 ? validCount : ""} URL{validCount !== 1 ? "s" : ""}
-            </button>
-          </div>
-        </div>
-      )}
-
+      {/* Progress bar — full width, shown while running */}
       {(bulkState === "running" || bulkState === "done") && (
-        <div className="bulk-progress-section">
+        <div className="compose-workspace__full-row">
           {bulkState === "running" && (
             <>
               <div className="bulk-progress-header">
@@ -880,176 +549,219 @@ function BulkMode() {
                   <span className="bulk-spinner" aria-hidden="true" />
                   Processing URLs — {completedCount} / {urlItems.length} done
                 </div>
-                <button className="btn btn-secondary btn-sm" onClick={handleCancel}>
+                <button className="btn btn-secondary btn--sm" onClick={handleCancel}>
                   Cancel
                 </button>
               </div>
               <div className="bulk-progress-bar-track">
                 <div
                   className="bulk-progress-bar-fill"
-                  style={{ width: urlItems.length > 0 ? `${(completedCount / urlItems.length) * 100}%` : "0%" }}
+                  style={{
+                    width:
+                      urlItems.length > 0
+                        ? `${(completedCount / urlItems.length) * 100}%`
+                        : "0%",
+                  }}
                 />
               </div>
             </>
           )}
+        </div>
+      )}
 
-          <div className="bulk-url-list">
-            {urlItems.map((item, i) => (
-              <div key={i} className={`bulk-url-item bulk-url-item--${item.status}`}>
-                <span className="bulk-url-icon" aria-hidden="true">
-                  {item.status === "done" && "✓"}
-                  {item.status === "skipped" && "⊘"}
-                  {item.status === "error" && "✗"}
-                  {item.status === "cancelled" && "—"}
-                  {item.status === "processing" && <span className="bulk-spinner-inline" />}
-                  {item.status === "pending" && "·"}
-                </span>
-                <span className="bulk-url-text">
-                  {item.profileName ? (
-                    <>
-                      <strong>{item.profileName}</strong>
-                      <span className="bulk-url-sub">{item.url}</span>
-                    </>
-                  ) : item.status === "skipped" ? (
-                    <>
-                      <span>{item.url}</span>
-                      {item.skippedStage && (
-                        <span className="bulk-url-sub">Already in pipeline — {item.skippedStage}</span>
-                      )}
-                    </>
-                  ) : item.status === "cancelled" ? (
-                    <>
-                      <span>{item.url}</span>
-                      <span className="bulk-url-sub">Cancelled</span>
-                    </>
-                  ) : (
-                    item.url
+      {/* Side-by-side: input | progress list */}
+      {bulkState === "idle" && (
+        <>
+          <div className="compose-workspace__input">
+            <div className="bulk-form">
+              <label className="form-label">LinkedIn Profile URLs (one per line)</label>
+              <textarea
+                className="bulk-textarea"
+                placeholder={
+                  "https://www.linkedin.com/in/person-one/\nhttps://www.linkedin.com/in/person-two/\nhttps://www.linkedin.com/in/person-three/"
+                }
+                value={rawUrls}
+                onChange={(e) => setRawUrls(e.target.value)}
+                rows={10}
+              />
+              {parsedUrls.length > 0 && (
+                <div className="bulk-url-stats">
+                  <span className="bulk-url-stat bulk-url-stat--valid">
+                    {validCount} valid URL{validCount !== 1 ? "s" : ""}
+                  </span>
+                  {invalidCount > 0 && (
+                    <span className="bulk-url-stat bulk-url-stat--invalid">
+                      {invalidCount} invalid (will be skipped)
+                    </span>
                   )}
+                </div>
+              )}
+              <div className="force-scrape-row">
+                <label className="force-scrape-label">
+                  <input
+                    type="checkbox"
+                    checked={forceScrape}
+                    onChange={(e) => setForceScrape(e.target.checked)}
+                  />
+                  Force re-scrape
+                </label>
+                <span className="force-scrape-hint">
+                  {forceScrape
+                    ? "Will re-scrape LinkedIn even if cached data exists."
+                    : "Cached data (up to 3 days old) will be used if available."}
                 </span>
-                {item.status === "error" && item.error && (
-                  <span className="bulk-url-error">{item.error}</span>
-                )}
               </div>
-            ))}
-            <div ref={urlListEndRef} />
-          </div>
-
-          {(bulkState === "running" || logEntries.length > 0) && (
-            <div className="diag-log-panel">
-              <button
-                className="diag-log-toggle"
-                onClick={() => setLogsExpanded((v) => !v)}
-                aria-expanded={logsExpanded}
-              >
-                <span className="diag-log-toggle-icon">{logsExpanded ? "▾" : "▸"}</span>
-                Diagnostic Logs
-                <span className="diag-log-count">{logEntries.length}</span>
-                {bulkState !== "running" && (
-                  <button
-                    className="btn-open-logs"
-                    onClick={(e) => { e.stopPropagation(); window.api.openLogsFolder(); }}
-                  >
-                    Open Logs Folder
-                  </button>
-                )}
-              </button>
-              {logsExpanded && (
-                <div className="diag-log-scroll">
-                  {logEntries.map((entry, i) => (
-                    <div key={i} className={`diag-log-line diag-log-${entry.level.toLowerCase()}`}>
-                      <span className="diag-log-time">{entry.timestamp.slice(11, 23)}</span>
-                      <span className="diag-log-level">{entry.level}</span>
-                      <span className="diag-log-component">[{entry.component}]</span>
-                      <span className="diag-log-msg">{entry.message}</span>
-                    </div>
-                  ))}
-                  <div ref={logEndRef} />
-                </div>
-              )}
-            </div>
-          )}
-
-          {bulkState === "done" && summary && (
-            <div className="bulk-summary">
-              <div className="bulk-summary-counts">
-                {summary.added > 0 && (
-                  <span className="bulk-summary-stat bulk-summary-stat--success">
-                    ✓ {summary.added} lead{summary.added !== 1 ? "s" : ""} added to Drafts
-                  </span>
-                )}
-                {summary.skipped.length > 0 && (
-                  <span className="bulk-summary-stat bulk-summary-stat--skipped">
-                    ⊘ {summary.skipped.length} skipped (already in pipeline)
-                  </span>
-                )}
-                {summary.failed.length > 0 && (
-                  <span className="bulk-summary-stat bulk-summary-stat--fail">
-                    ✗ {summary.failed.length} failed
-                  </span>
-                )}
-              </div>
-
-              {summary.skipped.length > 0 && (
-                <div className="bulk-summary-skipped">
-                  <div className="bulk-summary-skipped-label">Already in pipeline:</div>
-                  {summary.skipped.map((s, i) => (
-                    <div key={i} className="bulk-summary-skipped-item">
-                      <span className="bulk-summary-skipped-name">{s.name}</span>
-                      <span className="bulk-summary-skipped-stage">{s.stage}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {summary.failed.length > 0 && (
-                <div className="bulk-summary-failed">
-                  <div className="bulk-summary-failed-label">Failed:</div>
-                  {summary.failed.map((f, i) => (
-                    <div key={i} className="bulk-summary-failed-item">
-                      <span className="bulk-summary-failed-url">{f.url}</span>
-                      <span className="bulk-summary-failed-reason">{f.reason}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="bulk-summary-actions">
-                {summary.added > 0 && (
-                  <button
-                    className="btn btn-primary"
-                    onClick={() => navigate("/drafts")}
-                  >
-                    Go to Drafts
-                  </button>
-                )}
-                <button className="btn btn-secondary" onClick={handleReset}>
-                  Process More
+              <div className="bulk-actions">
+                <button
+                  className="btn btn-primary"
+                  disabled={validCount === 0}
+                  onClick={handleStart}
+                >
+                  Process {validCount > 0 ? validCount : ""} URL{validCount !== 1 ? "s" : ""}
                 </button>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+
+          <div className="compose-workspace__result compose-workspace__result--bulk-hint">
+            <p className="compose-bulk-hint">
+              Paste LinkedIn profile URLs on the left — one per line. Valid URLs will be queued and
+              processed in order.
+            </p>
+          </div>
+        </>
       )}
-    </>
+
+      {(bulkState === "running" || bulkState === "done") && (
+        <>
+          <div className="compose-workspace__input">
+            <div className="bulk-url-list">
+              {urlItems.map((item, i) => (
+                <div key={i} className={`bulk-url-item bulk-url-item--${item.status}`}>
+                  <span className="bulk-url-icon" aria-hidden="true">
+                    {item.status === "done" && <Check size={14} />}
+                    {item.status === "skipped" && <Ban size={14} />}
+                    {item.status === "error" && <X size={14} />}
+                    {item.status === "cancelled" && <Minus size={14} />}
+                    {item.status === "processing" && <span className="bulk-spinner-inline" />}
+                    {item.status === "pending" && <Circle size={8} />}
+                  </span>
+                  <span className="bulk-url-text">
+                    {item.profileName ? (
+                      <>
+                        <strong>{item.profileName}</strong>
+                        <span className="bulk-url-sub">{item.url}</span>
+                      </>
+                    ) : item.status === "skipped" ? (
+                      <>
+                        <span>{item.url}</span>
+                        {item.skippedStage && (
+                          <span className="bulk-url-sub">
+                            Already in pipeline — {item.skippedStage}
+                          </span>
+                        )}
+                      </>
+                    ) : item.status === "cancelled" ? (
+                      <>
+                        <span>{item.url}</span>
+                        <span className="bulk-url-sub">Cancelled</span>
+                      </>
+                    ) : item.status === "processing" ? (
+                      <>
+                        <span>{item.url}</span>
+                        {currentStepLabel && (
+                          <span className="bulk-url-sub bulk-url-sub--step">{currentStepLabel}…</span>
+                        )}
+                      </>
+                    ) : (
+                      item.url
+                    )}
+                  </span>
+                  {item.status === "error" && item.error && (
+                    <span className="bulk-url-error">{item.error}</span>
+                  )}
+                </div>
+              ))}
+              <div ref={urlListEndRef} />
+            </div>
+          </div>
+
+          {/* Summary panel on the right when done */}
+          <div className="compose-workspace__result">
+
+            {bulkState === "done" && summary && (
+              <div className="bulk-summary">
+                <div className="bulk-summary-counts">
+                  {summary.added > 0 && (
+                    <span className="bulk-summary-stat bulk-summary-stat--success btn-icon">
+                      <Check size={14} /> {summary.added} lead{summary.added !== 1 ? "s" : ""}{" "}
+                      added to Drafts
+                    </span>
+                  )}
+                  {summary.skipped.length > 0 && (
+                    <span className="bulk-summary-stat bulk-summary-stat--skipped btn-icon">
+                      <Ban size={14} /> {summary.skipped.length} skipped (already in pipeline)
+                    </span>
+                  )}
+                  {summary.failed.length > 0 && (
+                    <span className="bulk-summary-stat bulk-summary-stat--fail btn-icon">
+                      <X size={14} /> {summary.failed.length} failed
+                    </span>
+                  )}
+                </div>
+
+                {summary.skipped.length > 0 && (
+                  <div className="bulk-summary-skipped">
+                    <div className="bulk-summary-skipped-label">Already in pipeline:</div>
+                    {summary.skipped.map((s, i) => (
+                      <div key={i} className="bulk-summary-skipped-item">
+                        <span className="bulk-summary-skipped-name">{s.name}</span>
+                        <span className="bulk-summary-skipped-stage">{s.stage}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {summary.failed.length > 0 && (
+                  <div className="bulk-summary-failed">
+                    <div className="bulk-summary-failed-label">Failed:</div>
+                    {summary.failed.map((f, i) => (
+                      <div key={i} className="bulk-summary-failed-item">
+                        <span className="bulk-summary-failed-url">{f.url}</span>
+                        <span className="bulk-summary-failed-reason">{f.reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="bulk-summary-actions">
+                  {summary.added > 0 && (
+                    <button className="btn btn-primary" onClick={() => navigate("/drafts")}>
+                      Go to Drafts
+                    </button>
+                  )}
+                  <button className="btn btn-secondary" onClick={handleReset}>
+                    Process More
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+    </div>
   );
 }
 
-// ─── Page root ────────────────────────────────────────────────────────────────
+// ─── Page Root ────────────────────────────────────────────────────────────────
 
 export default function ComposePage() {
   const [mode, setMode] = useState<Mode>("single");
-  const [promptRefreshKey, setPromptRefreshKey] = useState(0);
-
-  function handleConfigSaved() {
-    setPromptRefreshKey((k) => k + 1);
-  }
 
   return (
-    <div className="container">
-      <SenderConfigSection onSaved={handleConfigSaved} />
-      <PromptPreviewSection refreshKey={promptRefreshKey} />
-
-      <div className="compose-mode-row">
+    <div className="compose-page">
+      <div className="compose-hero">
         <div className="mode-toggle">
           <button
             className={`mode-toggle-btn${mode === "single" ? " mode-toggle-btn--active" : ""}`}

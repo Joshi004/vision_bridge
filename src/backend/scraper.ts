@@ -714,7 +714,13 @@ async function scrapePosts(page: Page, profileUrl: string): Promise<PostData[]> 
   }
 }
 
-export async function scrapeProfiles(urls: string[]): Promise<ProfileData[]> {
+export type ScrapeStepCallback = (
+  stepId: string,
+  status: 'active' | 'completed' | 'failed' | 'skipped',
+  detail?: string
+) => void
+
+export async function scrapeProfiles(urls: string[], onStep?: ScrapeStepCallback): Promise<ProfileData[]> {
   log.info("scraper", `Starting scrape for ${urls.length} profile(s)`);
   urls.forEach((u, i) => log.debug("scraper", `  [${i + 1}] ${u}`));
 
@@ -760,6 +766,7 @@ export async function scrapeProfiles(urls: string[]): Promise<ProfileData[]> {
 
       // --- Profile header ---
       let t = Date.now();
+      onStep?.("load-profile", "active");
       await page.goto(url, { waitUntil: "domcontentloaded" });
 
       const landedUrl = page.url();
@@ -768,12 +775,14 @@ export async function scrapeProfiles(urls: string[]): Promise<ProfileData[]> {
         landedUrl.includes("/checkpoint") ||
         landedUrl.includes("/authwall")
       ) {
+        onStep?.("load-profile", "failed", "Session expired");
         throw new Error("SESSION_EXPIRED");
       }
 
       await page.waitForSelector(HEADER_SELECTORS.name, { timeout: 15_000 });
       await new Promise((resolve) => setTimeout(resolve, 1_500));
       log.debug("scraper", `Profile page loaded in ${Date.now() - t}ms`);
+      onStep?.("load-profile", "completed");
 
       const name = await extractText(page, HEADER_SELECTORS.name);
       const headline = await extractText(page, HEADER_SELECTORS.headline);
@@ -786,20 +795,27 @@ export async function scrapeProfiles(urls: string[]): Promise<ProfileData[]> {
       log.debug("scraper", `Scroll-to-load completed in ${Date.now() - t}ms`);
 
       t = Date.now();
+      onStep?.("extract-about", "active");
       const about = await extractAbout(page);
       log.debug("scraper", `extractAbout: ${about ? `${about.length} chars` : "null"} (${Date.now() - t}ms)`);
+      onStep?.("extract-about", "completed", about ? `${about.length} characters` : undefined);
 
       t = Date.now();
+      onStep?.("extract-experience-education", "active");
       const experience = await extractExperience(page);
       log.debug("scraper", `extractExperience: ${experience.length} entries (${Date.now() - t}ms)`);
 
       t = Date.now();
       const education = await extractEducation(page);
       log.debug("scraper", `extractEducation: ${education.length} entries (${Date.now() - t}ms)`);
+      onStep?.("extract-experience-education", "completed", `${experience.length} jobs, ${education.length} schools`);
 
       t = Date.now();
+      onStep?.("read-recommendations", "active");
       const recommendations = await extractRecommendations(page);
       log.debug("scraper", `extractRecommendations: ${recommendations.length} entries (${Date.now() - t}ms)`);
+      onStep?.("read-recommendations", recommendations.length > 0 ? "completed" : "skipped",
+        recommendations.length > 0 ? `${recommendations.length} found` : undefined);
 
       // Resolve logged-in user name from the nav bar on the first profile page.
       if (loggedInName === null) {
@@ -809,13 +825,19 @@ export async function scrapeProfiles(urls: string[]): Promise<ProfileData[]> {
 
       // --- Existing conversation ---
       t = Date.now();
+      onStep?.("scrape-messages", "active");
       const messages = await scrapeMessages(page, loggedInName, name);
       log.info("scraper", `scrapeMessages returned ${messages.length} message(s) (${Date.now() - t}ms)`);
+      onStep?.("scrape-messages", messages.length > 0 ? "completed" : "skipped",
+        messages.length > 0 ? `${messages.length} message(s)` : undefined);
 
       // --- Posts ---
       t = Date.now();
+      onStep?.("analyze-posts", "active");
       const posts = await scrapePosts(page, url);
       log.debug("scraper", `scrapePosts returned ${posts.length} post(s) (${Date.now() - t}ms)`);
+      onStep?.("analyze-posts", posts.length > 0 ? "completed" : "skipped",
+        posts.length > 0 ? `${posts.length} post(s)` : undefined);
 
       results.push({
         url,

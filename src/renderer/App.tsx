@@ -1,82 +1,98 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import { Routes, Route, NavLink } from "react-router-dom";
+import React, { useState, useEffect, useCallback } from "react";
+import { Routes, Route, useNavigate, useLocation } from "react-router-dom";
 import ComposePage from "./pages/ComposePage";
 import DraftsPage from "./pages/DraftsPage";
 import TrackingPage from "./pages/TrackingPage";
 import RepliesPage from "./pages/RepliesPage";
 import ClosedPage from "./pages/ClosedPage";
+import SettingsPage from "./pages/SettingsPage";
+import PipelinePage from "./pages/PipelinePage";
+import Sidebar from "./components/Sidebar";
+import StatusBar from "./components/StatusBar";
+import BottomPanel, { BottomPanelContext } from "./components/BottomPanel";
+import TitleBar from "./components/TitleBar";
+import CommandPalette from "./components/CommandPalette";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
+import { NotificationProvider, NotificationToast } from "./hooks/useNotifications";
+import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors, type DragEndEvent, type DragStartEvent } from "@dnd-kit/core";
+import { LeadDragOverlay, type DragLeadData } from "./components/DraggableLeadRow";
 
-function QueueIndicator() {
-  const [pendingCount, setPendingCount] = useState(0);
-  const [hasActive, setHasActive] = useState(false);
-  const itemsRef = useRef<Map<string, QueueItemStatus>>(new Map());
-  const progressHandlerRef = useRef<QueueProgressHandler | null>(null);
-  const drainedHandlerRef = useRef<QueueDrainedHandler | null>(null);
+type BottomPanelTab = "logs" | "queue" | "output";
+export type AppTheme = "light" | "dark" | "system";
 
-  function syncState() {
-    const pending = [...itemsRef.current.values()].filter(
-      (i) => i.status === "queued" || i.status === "active"
-    );
-    setPendingCount(pending.length);
-    setHasActive(pending.some((i) => i.status === "active"));
+const SIDEBAR_COLLAPSED_KEY = "sidebar_collapsed";
+const THEME_KEY = "app_theme";
+
+function applyTheme(theme: AppTheme, mq?: MediaQueryList) {
+  if (theme === "system") {
+    const prefersDark = mq ? mq.matches : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = prefersDark ? "dark" : "light";
+  } else {
+    document.documentElement.dataset.theme = theme;
   }
+}
 
-  useEffect(() => {
-    window.api.queue.getStatus().then((s) => {
-      for (const item of [...s.dataQueue, ...s.actionQueue]) {
-        itemsRef.current.set(item.id, item);
-      }
-      syncState();
-    }).catch(() => {});
-
-    const ph = window.api.queue.onProgress((item) => {
-      itemsRef.current.set(item.id, item);
-      syncState();
-    });
-    progressHandlerRef.current = ph;
-
-    const dh = window.api.queue.onDrained(() => {
-      // Remove terminal items from the local tracking map
-      for (const [id, item] of itemsRef.current) {
-        if (
-          item.status === "completed" ||
-          item.status === "failed" ||
-          item.status === "cancelled"
-        ) {
-          itemsRef.current.delete(id);
-        }
-      }
-      syncState();
-    });
-    drainedHandlerRef.current = dh;
-
-    return () => {
-      if (progressHandlerRef.current) {
-        window.api.queue.removeProgressListener(progressHandlerRef.current);
-        progressHandlerRef.current = null;
-      }
-      if (drainedHandlerRef.current) {
-        window.api.queue.removeDrainedListener(drainedHandlerRef.current);
-        drainedHandlerRef.current = null;
-      }
-    };
-  }, []);
-
-  if (pendingCount === 0) return null;
-
-  return (
-    <div className="queue-indicator">
-      {hasActive && <span className="queue-indicator__dot" aria-hidden="true" />}
-      {hasActive
-        ? `Processing ${pendingCount} task${pendingCount !== 1 ? "s" : ""}…`
-        : `${pendingCount} task${pendingCount !== 1 ? "s" : ""} queued`}
-    </div>
-  );
+function PageTransition({ children }: { children: React.ReactNode }) {
+  return <div className="page-transition">{children}</div>;
 }
 
 export default function App() {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [overdueCount, setOverdueCount] = useState(0);
-  const [sessionExpiredBanner, setSessionExpiredBanner] = useState(false);
+  const [draftsCount, setDraftsCount] = useState(0);
+  const [repliesCount, setRepliesCount] = useState(0);
+  const [totalLeadCount, setTotalLeadCount] = useState<number | null>(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const [bottomPanelOpen, setBottomPanelOpen] = useState(false);
+  const [bottomPanelTab, setBottomPanelTab] = useState<BottomPanelTab>("logs");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+  });
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [theme, setTheme] = useState<AppTheme>(() => {
+    return (localStorage.getItem(THEME_KEY) as AppTheme) || "system";
+  });
+  const [activeDragLead, setActiveDragLead] = useState<DragLeadData | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        delay: 200,
+        tolerance: 5,
+      },
+    })
+  );
+
+  const openPanel = useCallback((tab: BottomPanelTab = "logs") => {
+    setBottomPanelTab(tab);
+    setBottomPanelOpen(true);
+  }, []);
+
+  const handleThemeChange = useCallback((newTheme: AppTheme) => {
+    setTheme(newTheme);
+    localStorage.setItem(THEME_KEY, newTheme);
+    applyTheme(newTheme);
+  }, []);
+
+  // Apply theme on mount and when system preference changes
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    applyTheme(theme, mq);
+    if (theme === "system") {
+      const handler = () => applyTheme("system", mq);
+      mq.addEventListener("change", handler);
+      return () => mq.removeEventListener("change", handler);
+    }
+  }, [theme]);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next));
+      return next;
+    });
+  }, []);
 
   const refreshOverdueCount = useCallback(async () => {
     try {
@@ -87,68 +103,195 @@ export default function App() {
     }
   }, []);
 
+  const refreshTotalLeadCount = useCallback(async () => {
+    try {
+      const [drafts, tracking, replies, converted, cold] = await Promise.all([
+        window.api.getLeadsByStage("draft"),
+        window.api.getLeadsByStage("contacted"),
+        window.api.getLeadsByStage("replied"),
+        window.api.getLeadsByStage("converted"),
+        window.api.getLeadsByStage("cold"),
+      ]);
+      setDraftsCount(drafts.length);
+      setRepliesCount(replies.length);
+      setTotalLeadCount(drafts.length + tracking.length + replies.length + converted.length + cold.length);
+    } catch {
+      // Non-fatal
+    }
+  }, []);
+
   useEffect(() => {
     refreshOverdueCount();
-  }, [refreshOverdueCount]);
+    refreshTotalLeadCount();
+  }, [refreshOverdueCount, refreshTotalLeadCount]);
+
+  // Refresh total count on global refresh events
+  useEffect(() => {
+    window.addEventListener("visionbridge:refresh", refreshTotalLeadCount);
+    return () => window.removeEventListener("visionbridge:refresh", refreshTotalLeadCount);
+  }, [refreshTotalLeadCount]);
 
   useEffect(() => {
     const handler = window.api.queue.onSessionExpired(() => {
-      setSessionExpiredBanner(true);
+      setSessionExpired(true);
     });
     return () => {
       window.api.queue.removeSessionExpiredListener(handler);
     };
   }, []);
 
+  // Listen for menu-triggered navigation and actions from Electron
+  useEffect(() => {
+    const navHandler = window.api.onMenuNavigate?.((path: string) => {
+      navigate(path);
+    });
+    const actionHandler = window.api.onMenuAction?.((action: string) => {
+      switch (action) {
+        case "command-palette":
+          setCommandPaletteOpen((prev) => !prev);
+          break;
+        case "toggle-sidebar":
+          toggleSidebar();
+          break;
+        case "toggle-panel":
+          setBottomPanelOpen((prev) => !prev);
+          break;
+        case "refresh":
+          window.dispatchEvent(new CustomEvent("visionbridge:refresh"));
+          break;
+        case "new-lead":
+          navigate("/");
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent("visionbridge:focus-compose"));
+          }, 50);
+          break;
+      }
+    });
+    return () => {
+      window.api.offMenuNavigate?.(navHandler);
+      window.api.offMenuAction?.(actionHandler);
+    };
+  }, [navigate, toggleSidebar]);
+
+  const shortcutHandlers = {
+    onNavigate: useCallback((path: string) => navigate(path), [navigate]),
+    onToggleCommandPalette: useCallback(() => setCommandPaletteOpen((prev) => !prev), []),
+    onToggleSidebar: toggleSidebar,
+    onToggleBottomPanel: useCallback(() => setBottomPanelOpen((prev) => !prev), []),
+    onOpenSettings: useCallback(() => navigate("/settings"), [navigate]),
+    onFocusComposeInput: useCallback(() => {
+      navigate("/");
+      // Give the page time to mount, then dispatch focus event
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent("visionbridge:focus-compose"));
+      }, 50);
+    }, [navigate]),
+    onRefresh: useCallback(() => {
+      window.dispatchEvent(new CustomEvent("visionbridge:refresh"));
+    }, []),
+    onEscape: useCallback(() => {
+      if (commandPaletteOpen) {
+        setCommandPaletteOpen(false);
+      } else if (bottomPanelOpen) {
+        setBottomPanelOpen(false);
+      }
+    }, [commandPaletteOpen, bottomPanelOpen]),
+  };
+
+  useKeyboardShortcuts(shortcutHandlers);
+
+  function handleDragStart(event: DragStartEvent) {
+    setActiveDragLead(event.active.data.current as DragLeadData);
+  }
+
+  async function handleDragEnd(event: DragEndEvent) {
+    setActiveDragLead(null);
+    const { active, over } = event;
+    if (!over || !active.data.current) return;
+
+    const lead = active.data.current as DragLeadData;
+    const targetStage = over.id as string;
+
+    if (targetStage === lead.currentStage) return;
+
+    try {
+      if (targetStage === "closed" && (lead.currentStage === "draft" || lead.currentStage === "tracking")) {
+        await window.api.markCold(lead.leadId);
+        window.dispatchEvent(new CustomEvent("visionbridge:refresh"));
+      } else if (targetStage === "draft" && lead.currentStage === "closed") {
+        await window.api.reopenLead(lead.leadId);
+        window.dispatchEvent(new CustomEvent("visionbridge:refresh"));
+      }
+    } catch {
+      // Non-fatal; user can perform the action manually
+    }
+  }
+
   return (
-    <div>
-      <header className="app-header">
-        <div className="app-header-inner">
-          <span className="app-logo">Vision</span>
-          <nav className="app-nav">
-            <NavLink to="/" end className={({ isActive }) => "nav-link" + (isActive ? " nav-link--active" : "")}>
-              Compose
-            </NavLink>
-            <NavLink to="/drafts" className={({ isActive }) => "nav-link" + (isActive ? " nav-link--active" : "")}>
-              Drafts
-            </NavLink>
-            <NavLink to="/tracking" className={({ isActive }) => "nav-link" + (isActive ? " nav-link--active" : "")}>
-              Tracking
-              {overdueCount > 0 && <span className="nav-badge">{overdueCount}</span>}
-            </NavLink>
-            <NavLink to="/replies" className={({ isActive }) => "nav-link" + (isActive ? " nav-link--active" : "")}>
-              Replies
-            </NavLink>
-            <NavLink to="/closed" className={({ isActive }) => "nav-link" + (isActive ? " nav-link--active" : "")}>
-              Closed
-            </NavLink>
-          </nav>
-          <QueueIndicator />
+    <NotificationProvider>
+    <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+    <BottomPanelContext.Provider value={{ openPanel }}>
+      <div className="app-root">
+        <TitleBar onSearchClick={() => setCommandPaletteOpen(true)} />
+        <div className="app-shell">
+          <Sidebar
+            overdueCount={overdueCount}
+            draftsCount={draftsCount}
+            repliesCount={repliesCount}
+            collapsed={sidebarCollapsed}
+            onToggle={toggleSidebar}
+          />
+          <div className="app-main">
+            <main className="app-content">
+              <Routes location={location} key={location.pathname}>
+                <Route path="/" element={<PageTransition><ComposePage /></PageTransition>} />
+                <Route path="/drafts" element={<PageTransition><DraftsPage /></PageTransition>} />
+                <Route
+                  path="/tracking"
+                  element={<PageTransition><TrackingPage onOverdueChange={refreshOverdueCount} /></PageTransition>}
+                />
+                <Route path="/replies" element={<PageTransition><RepliesPage /></PageTransition>} />
+                <Route path="/closed" element={<PageTransition><ClosedPage /></PageTransition>} />
+                <Route path="/pipeline" element={<PageTransition><PipelinePage /></PageTransition>} />
+                <Route path="/settings" element={<PageTransition><SettingsPage theme={theme} onThemeChange={handleThemeChange} /></PageTransition>} />
+              </Routes>
+            </main>
+            <BottomPanel
+              isOpen={bottomPanelOpen}
+              activeTab={bottomPanelTab}
+              onToggle={() => setBottomPanelOpen((prev) => !prev)}
+              onTabChange={(tab) => {
+                setBottomPanelTab(tab as BottomPanelTab);
+                setBottomPanelOpen(true);
+              }}
+            />
+            <StatusBar sessionExpired={sessionExpired} totalLeadCount={totalLeadCount} />
+          </div>
         </div>
-      </header>
-
-      {sessionExpiredBanner && (
-        <div className="session-expired-banner">
-          <span>
-            LinkedIn session expired — remaining tasks were cancelled. Please log in again via the{" "}
-            <NavLink to="/" className="session-expired-banner__link">Compose</NavLink> page.
-          </span>
-          <button
-            className="session-expired-banner__dismiss"
-            onClick={() => setSessionExpiredBanner(false)}
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
-
-      <Routes>
-        <Route path="/" element={<ComposePage />} />
-        <Route path="/drafts" element={<DraftsPage />} />
-        <Route path="/tracking" element={<TrackingPage onOverdueChange={refreshOverdueCount} />} />
-        <Route path="/replies" element={<RepliesPage />} />
-        <Route path="/closed" element={<ClosedPage />} />
-      </Routes>
-    </div>
+        <CommandPalette
+          isOpen={commandPaletteOpen}
+          onClose={() => setCommandPaletteOpen(false)}
+          onNavigate={(path) => {
+            navigate(path);
+            setCommandPaletteOpen(false);
+          }}
+          onToggleSidebar={() => {
+            toggleSidebar();
+            setCommandPaletteOpen(false);
+          }}
+          onToggleBottomPanel={() => {
+            setBottomPanelOpen((prev) => !prev);
+            setCommandPaletteOpen(false);
+          }}
+        />
+        <NotificationToast onNavigate={navigate} />
+        <DragOverlay dropAnimation={null}>
+          {activeDragLead ? <LeadDragOverlay leadName={activeDragLead.leadName} /> : null}
+        </DragOverlay>
+      </div>
+    </BottomPanelContext.Provider>
+    </DndContext>
+    </NotificationProvider>
   );
 }
+

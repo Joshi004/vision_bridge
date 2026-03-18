@@ -233,7 +233,7 @@ export function getLeadsWithProfileByStage(stage: string): LeadWithProfile[] {
         FROM linkedin_messages
         WHERE profile_id IN (${placeholders})
       )
-      WHERE rn <= 4
+      WHERE rn <= 20
       ORDER BY profile_id, rn DESC
     `)
     .all(...profileIds) as MsgRow[];
@@ -328,7 +328,7 @@ export function getLeadWithProfileById(leadId: number): LeadWithProfile | undefi
         FROM linkedin_messages
         WHERE profile_id = ?
       )
-      WHERE rn <= 4
+      WHERE rn <= 20
       ORDER BY rn DESC
     `)
     .all(row.profile_id) as MsgRow[];
@@ -415,6 +415,20 @@ export function getLeadById(leadId: number): LeadRow | undefined {
   return db
     .prepare<number[], LeadRow>("SELECT * FROM leads WHERE id = ?")
     .get(leadId) as LeadRow | undefined;
+}
+
+/**
+ * Return the name for a profile by its internal id.
+ * Returns undefined if the profile does not exist or has no name.
+ */
+export function getProfileName(profileId: number): string | undefined {
+  const db = getDb();
+  const row = db
+    .prepare<number[], { name: string | null }>(
+      "SELECT name FROM profiles WHERE id = ?"
+    )
+    .get(profileId) as { name: string | null } | undefined;
+  return row?.name ?? undefined;
 }
 
 /**

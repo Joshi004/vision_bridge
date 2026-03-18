@@ -15,6 +15,7 @@ import {
   getLeadByProfileId,
   getLeadById,
   getProfileLinkedInUrl,
+  getProfileName,
   addToThread,
   getLeadsWithProfileByStage,
   getLeadWithProfileById,
@@ -71,7 +72,7 @@ function correctConversationType(
 export function registerLeadHandlers(): void {
   // ─── Data-queue job handlers ──────────────────────────────────────────────
 
-  registerJobHandler('refresh-profile', async (payload) => {
+  registerJobHandler('refresh-profile', async (payload, _jobId) => {
     const leadId = payload.leadId as number
     const linkedinUrl = payload.linkedinUrl as string
 
@@ -99,7 +100,7 @@ export function registerLeadHandlers(): void {
     }
   })
 
-  registerJobHandler('refresh-both', async (payload) => {
+  registerJobHandler('refresh-both', async (payload, _jobId) => {
     const leadId = payload.leadId as number
     const linkedinUrl = payload.linkedinUrl as string
 
@@ -130,7 +131,7 @@ export function registerLeadHandlers(): void {
     }
   })
 
-  registerJobHandler('check-replies', async (payload) => {
+  registerJobHandler('check-replies', async (payload, _jobId) => {
     const leadId = payload.leadId as number
     const profileId = payload.profileId as number
     const linkedinUrl = payload.linkedinUrl as string
@@ -433,7 +434,7 @@ export function registerLeadHandlers(): void {
       }
 
       try {
-        const { jobId } = enqueue('send-initial', { leadId, linkedinUrl, messageText })
+        const { jobId } = enqueue('send-initial', { leadId, linkedinUrl, messageText, leadName: getProfileName(lead.profile_id) })
         log.info('ipc/lead', `Lead ${leadId} send enqueued as job ${jobId}`)
         return { queued: true, jobId }
       } catch (err) {
@@ -460,7 +461,7 @@ export function registerLeadHandlers(): void {
       try {
         const enqueued = enqueue(
           'refresh-profile',
-          { leadId, linkedinUrl },
+          { leadId, linkedinUrl, leadName: getProfileName(lead.profile_id) },
           { waitForResult: true }
         ) as { jobId: string; result: Promise<unknown> }
         return await enqueued.result
@@ -488,7 +489,7 @@ export function registerLeadHandlers(): void {
       try {
         const enqueued = enqueue(
           'refresh-both',
-          { leadId, linkedinUrl },
+          { leadId, linkedinUrl, leadName: getProfileName(lead.profile_id) },
           { waitForResult: true }
         ) as { jobId: string; result: Promise<unknown> }
         return await enqueued.result
@@ -583,7 +584,7 @@ export function registerLeadHandlers(): void {
       }
 
       try {
-        const { jobId } = enqueue('send-followup', { leadId, linkedinUrl, messageText: message.trim(), followUpType })
+        const { jobId } = enqueue('send-followup', { leadId, linkedinUrl, messageText: message.trim(), followUpType, leadName: getProfileName(lead.profile_id) })
         log.info('ipc/lead', `Lead ${leadId} follow-up enqueued as job ${jobId}`)
         return { queued: true, jobId }
       } catch (err) {
@@ -610,7 +611,7 @@ export function registerLeadHandlers(): void {
       try {
         const enqueued = enqueue(
           'check-replies',
-          { leadId, profileId: lead.profile_id, linkedinUrl },
+          { leadId, profileId: lead.profile_id, linkedinUrl, leadName: getProfileName(lead.profile_id) },
           { waitForResult: true }
         ) as { jobId: string; result: Promise<unknown> }
         return await enqueued.result
@@ -633,7 +634,7 @@ export function registerLeadHandlers(): void {
         continue
       }
       try {
-        enqueue('check-replies', { leadId: lead.id, profileId: lead.profile_id, linkedinUrl })
+        enqueue('check-replies', { leadId: lead.id, profileId: lead.profile_id, linkedinUrl, leadName: getProfileName(lead.profile_id) })
         enqueued++
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
@@ -731,7 +732,7 @@ export function registerLeadHandlers(): void {
       }
 
       try {
-        const { jobId } = enqueue('send-reply', { leadId, linkedinUrl, messageText: message.trim() })
+        const { jobId } = enqueue('send-reply', { leadId, linkedinUrl, messageText: message.trim(), leadName: getProfileName(lead.profile_id) })
         log.info('ipc/lead', `Lead ${leadId} reply enqueued as job ${jobId}`)
         return { queued: true, jobId }
       } catch (err) {
@@ -827,6 +828,46 @@ export function registerLeadHandlers(): void {
       }
     }
   )
+
+  ipcMain.handle(IPC.LEAD_GET_THREAD, (_event, { leadId }: { leadId: number }) => {
+    const lead = getLeadById(leadId)
+    if (!lead) {
+      return { success: false, error: `Lead with id ${leadId} not found.` }
+    }
+
+    const thread = getConversationThread(leadId)
+    if (thread.length > 0) {
+      return { conversationThread: thread }
+    }
+
+    // Fallback: return up to 20 stored linkedin_messages as synthetic thread entries
+    const db = getDb()
+    type MsgRow = { sender: string; text: string; timestamp: string | null }
+    const msgs = db
+      .prepare<number[], MsgRow>(
+        `SELECT sender, text, timestamp
+         FROM (
+           SELECT sender, text, timestamp,
+                  ROW_NUMBER() OVER (PARTITION BY profile_id ORDER BY sort_order ASC) AS rn
+           FROM linkedin_messages
+           WHERE profile_id = ?
+         )
+         WHERE rn <= 20`
+      )
+      .all(lead.profile_id) as MsgRow[]
+
+    const syntheticThread = msgs.map((m, i) => ({
+      id: -(i + 1),
+      lead_id: leadId,
+      message_type: m.sender === 'self' ? 'initial' : 'reply_received',
+      sender: m.sender,
+      message: m.text,
+      sent_at: m.timestamp ?? null,
+      created_at: m.timestamp ?? null,
+    }))
+
+    return { conversationThread: syntheticThread }
+  })
 
   ipcMain.handle(IPC.LEAD_REOPEN, async (_event, { leadId }: { leadId: number }) => {
     const lead = getLeadById(leadId)

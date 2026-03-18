@@ -1,6 +1,7 @@
 export const IPC = {
   SCRAPE_RUN: "scrape:run",
   SCRAPE_LOG: "scrape:log",
+  SCRAPE_ACTIVITY: "scrape:activity",
   SCRAPE_BULK_RUN: "scrape:bulk-run",
   SCRAPE_BULK_PROGRESS: "scrape:bulk-progress",
   SCRAPE_BULK_CANCEL: "scrape:bulk-cancel",
@@ -31,6 +32,7 @@ export const IPC = {
   LEAD_GENERATE_REPLY: "lead:generate-reply",
   LEAD_MARK_CONVERTED: "lead:mark-converted",
   LEAD_UPDATE_REPLIED: "lead:update-replied",
+  LEAD_GET_THREAD: "lead:get-thread",
   LEAD_REOPEN: "lead:reopen",
   QUEUE_CANCEL: "queue:cancel",
   QUEUE_STATUS: "queue:status",
@@ -38,6 +40,8 @@ export const IPC = {
   QUEUE_DRAINED: "queue:drained",
   QUEUE_RETRY: "queue:retry",
   QUEUE_SESSION_EXPIRED: "queue:session-expired",
+  CONTEXT_MENU_SHOW: "context-menu:show",
+  DIALOG_CONFIRM: "dialog:confirm",
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];

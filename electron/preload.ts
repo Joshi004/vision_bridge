@@ -2,6 +2,28 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../src/shared/ipc-channels'
 
 contextBridge.exposeInMainWorld('api', {
+  platform: process.platform,
+
+  onMenuNavigate: (callback: (path: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, path: string) => callback(path)
+    ipcRenderer.on('menu-navigate', handler)
+    return handler
+  },
+
+  offMenuNavigate: (handler: (event: unknown, path: unknown) => void) => {
+    ipcRenderer.off('menu-navigate', handler as Parameters<typeof ipcRenderer.off>[1])
+  },
+
+  onMenuAction: (callback: (action: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, action: string) => callback(action)
+    ipcRenderer.on('menu-action', handler)
+    return handler
+  },
+
+  offMenuAction: (handler: (event: unknown, action: unknown) => void) => {
+    ipcRenderer.off('menu-action', handler as Parameters<typeof ipcRenderer.off>[1])
+  },
+
   scrape: (url: string, forceScrape: boolean) =>
     ipcRenderer.invoke(IPC.SCRAPE_RUN, { url, forceScrape }),
 
@@ -22,6 +44,17 @@ contextBridge.exposeInMainWorld('api', {
 
   offScrapeLog: (handler: (event: unknown, entry: unknown) => void) => {
     ipcRenderer.off(IPC.SCRAPE_LOG, handler as Parameters<typeof ipcRenderer.off>[1])
+  },
+
+  onActivityStep: (callback: (step: { stepId: string; label: string; status: string; detail?: string; error?: string; startedAt?: number; completedAt?: number }) => void) => {
+    type StepPayload = Parameters<typeof callback>[0]
+    const handler = (_event: Electron.IpcRendererEvent, step: StepPayload) => callback(step)
+    ipcRenderer.on(IPC.SCRAPE_ACTIVITY, handler)
+    return handler
+  },
+
+  offActivityStep: (handler: (event: unknown, step: unknown) => void) => {
+    ipcRenderer.off(IPC.SCRAPE_ACTIVITY, handler as Parameters<typeof ipcRenderer.off>[1])
   },
 
   onBulkProgress: (callback: (event: unknown) => void) => {
@@ -112,6 +145,9 @@ contextBridge.exposeInMainWorld('api', {
   updateRepliedLead: (leadId: number) =>
     ipcRenderer.invoke(IPC.LEAD_UPDATE_REPLIED, { leadId }),
 
+  getLeadThread: (leadId: number) =>
+    ipcRenderer.invoke(IPC.LEAD_GET_THREAD, { leadId }),
+
   reopenLead: (leadId: number) =>
     ipcRenderer.invoke(IPC.LEAD_REOPEN, { leadId }),
 
@@ -158,4 +194,10 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.off(IPC.QUEUE_SESSION_EXPIRED, handler as Parameters<typeof ipcRenderer.off>[1])
     },
   },
+
+  showContextMenu: (items: { id: string; label: string; type?: 'separator'; enabled?: boolean; accelerator?: string }[]) =>
+    ipcRenderer.invoke(IPC.CONTEXT_MENU_SHOW, items),
+
+  showConfirmDialog: (title: string, message: string, detail?: string) =>
+    ipcRenderer.invoke(IPC.DIALOG_CONFIRM, { title, message, detail }),
 })

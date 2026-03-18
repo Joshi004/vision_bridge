@@ -1,4 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { RefreshCw, Sparkles, Check, ChevronRight, X, MessageSquare } from "lucide-react";
+import SplitPane from "../components/SplitPane";
+import Toolbar, { ToolbarDivider, ToolbarSpacer } from "../components/Toolbar";
+import { useListKeyboardNav } from "../hooks/useListKeyboardNav";
+import { useNotification } from "../hooks/useNotifications";
 
 function formatDate(iso: string | null): string {
   if (!iso) return "";
@@ -28,25 +33,34 @@ const STATE_LABELS: Record<string, string> = {
 
 function messageTypeLabel(type: string): string {
   switch (type) {
-    case "initial":
-      return "(initial outreach)";
-    case "follow_up_1":
-      return "(follow-up 1)";
-    case "follow_up_2":
-      return "(follow-up 2)";
-    case "follow_up_3":
-      return "(follow-up 3)";
-    case "reply_received":
-      return "(reply)";
-    default:
-      return "";
+    case "initial":      return "(initial outreach)";
+    case "follow_up_1":  return "(follow-up 1)";
+    case "follow_up_2":  return "(follow-up 2)";
+    case "follow_up_3":  return "(follow-up 3)";
+    case "reply_received": return "(reply)";
+    default:             return "";
   }
 }
 
 interface CardQueueInfo {
   jobId: string;
-  status: 'queued' | 'active' | 'failed';
+  status: "queued" | "active" | "failed";
   error?: string;
+}
+
+function getLastMessage(
+  lead: LeadWithProfile,
+  thread: OutreachThreadMessage[] | undefined
+): { text: string; timestamp: string | null } {
+  if (thread && thread.length > 0) {
+    const last = thread[thread.length - 1];
+    return { text: last.message, timestamp: last.sent_at };
+  }
+  if (lead.recentMessages.length > 0) {
+    const last = lead.recentMessages[lead.recentMessages.length - 1];
+    return { text: last.content, timestamp: last.timestamp };
+  }
+  return { text: "", timestamp: null };
 }
 
 export default function RepliesPage() {
@@ -54,56 +68,46 @@ export default function RepliesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Full conversation threads per lead (populated on demand)
+  const [selectedLeadId, setSelectedLeadId] = useState<number | null>(null);
+
+  // Full conversation threads per lead (cached)
   const [threads, setThreads] = useState<Record<number, OutreachThreadMessage[]>>({});
 
-  // Per-card reply composer text
+  // Per-lead reply composer text (preserved across selections)
   const [replyText, setReplyText] = useState<Record<number, string>>({});
 
-  // Per-card async operation locks
+  // Per-lead async operation locks
   const [generatingId, setGeneratingId] = useState<number | null>(null);
   const [sendingId, setSendingId] = useState<number | null>(null);
   const [updatingId, setUpdatingId] = useState<number | null>(null);
   const [markingConvertedId, setMarkingConvertedId] = useState<number | null>(null);
   const [markingColdId, setMarkingColdId] = useState<number | null>(null);
 
-  // Per-card queue state for send-reply jobs
+  // Per-lead queue state for send-reply jobs
   const [queueState, setQueueState] = useState<Record<number, CardQueueInfo>>({});
   const progressHandlerRef = useRef<ReturnType<typeof window.api.queue.onProgress> | null>(null);
 
-  // Inline confirmation states
-  const [confirmConvertedId, setConfirmConvertedId] = useState<number | null>(null);
-  const [confirmColdId, setConfirmColdId] = useState<number | null>(null);
-
-  // Per-card inline errors
+  // Per-lead inline errors and transient indicators
   const [cardErrors, setCardErrors] = useState<Record<number, string>>({});
-
-  // Per-card update result indicators
   const [updateResults, setUpdateResults] = useState<Record<number, string>>({});
   const updateResultTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
-
-  // Transient "Sent ✓" indicator per card
   const [sentIds, setSentIds] = useState<Set<number>>(new Set());
   const sentTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
 
-  // Toast notification
-  const [notification, setNotification] = useState<string | null>(null);
-  const notifTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { notify } = useNotification();
 
   // Update All progress
   const [updateAllState, setUpdateAllState] = useState<{ current: number; total: number } | null>(null);
   const [updateAllResult, setUpdateAllResult] = useState<{ checked: number; newMessages: number } | null>(null);
 
-  // Scroll refs for conversation threads (auto-scroll to bottom)
-  const threadRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  // Single thread scroll ref (only one conversation visible at a time)
+  const threadRef = useRef<HTMLDivElement | null>(null);
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   const showNotification = useCallback((msg: string) => {
-    if (notifTimerRef.current) clearTimeout(notifTimerRef.current);
-    setNotification(msg);
-    notifTimerRef.current = setTimeout(() => setNotification(null), 3500);
-  }, []);
+    notify(msg, "info");
+  }, [notify]);
 
   function setCardError(id: number, msg: string) {
     setCardErrors((prev) => ({ ...prev, [id]: msg }));
@@ -141,8 +145,8 @@ export default function RepliesPage() {
     }, 2000);
   }
 
-  function scrollThreadToBottom(id: number) {
-    const el = threadRefs.current[id];
+  function scrollThreadToBottom() {
+    const el = threadRef.current;
     if (el) {
       setTimeout(() => {
         el.scrollTop = el.scrollHeight;
@@ -169,20 +173,27 @@ export default function RepliesPage() {
     fetchLeads();
   }, [fetchLeads]);
 
-  // Auto-scroll thread to bottom when thread data changes
+  // Listen for global refresh shortcut
   useEffect(() => {
-    for (const id of Object.keys(threads)) {
-      scrollThreadToBottom(Number(id));
-    }
-  }, [threads]);
+    const handler = () => fetchLeads();
+    window.addEventListener("visionbridge:refresh", handler);
+    return () => window.removeEventListener("visionbridge:refresh", handler);
+  }, [fetchLeads]);
 
-  // Subscribe to queue progress events; sync with in-flight send-reply jobs on mount.
+  // Auto-scroll to bottom when thread for the selected lead updates
+  useEffect(() => {
+    if (selectedLeadId !== null) {
+      scrollThreadToBottom();
+    }
+  }, [threads, selectedLeadId]);
+
+  // Subscribe to queue progress events; sync in-flight send-reply jobs on mount
   useEffect(() => {
     window.api.queue.getStatus().then((snapshot) => {
       const replyJobs = snapshot.actionQueue.filter(
         (item) =>
-          item.type === 'send-reply' &&
-          (item.status === 'queued' || item.status === 'active' || item.status === 'failed')
+          item.type === "send-reply" &&
+          (item.status === "queued" || item.status === "active" || item.status === "failed")
       );
       if (replyJobs.length > 0) {
         const state: Record<number, CardQueueInfo> = {};
@@ -191,7 +202,7 @@ export default function RepliesPage() {
           if (leadId !== undefined) {
             state[leadId] = {
               jobId: job.id,
-              status: job.status as CardQueueInfo['status'],
+              status: job.status as CardQueueInfo["status"],
               error: job.error,
             };
           }
@@ -201,30 +212,28 @@ export default function RepliesPage() {
     });
 
     const handler = window.api.queue.onProgress((item) => {
-      if (item.type !== 'send-reply') return;
+      if (item.type !== "send-reply") return;
       const leadId = item.payload.leadId as number | undefined;
       if (leadId === undefined) return;
 
-      if (item.status === 'completed') {
+      if (item.status === "completed") {
         setQueueState((prev) => {
           const n = { ...prev };
           delete n[leadId];
           return n;
         });
-        // Clear the reply textarea
         setReplyText((prev) => {
           const n = { ...prev };
           delete n[leadId];
           return n;
         });
-        // Optimistically append sent message to thread using payload text
         const messageText = item.payload.message as string | undefined;
         if (messageText) {
           const sentMsg: OutreachThreadMessage = {
             id: Date.now(),
             lead_id: leadId,
-            message_type: 'reply_sent',
-            sender: 'self',
+            message_type: "reply_sent",
+            sender: "self",
             message: messageText,
             sent_at: new Date().toISOString(),
             created_at: new Date().toISOString(),
@@ -235,23 +244,22 @@ export default function RepliesPage() {
           });
         }
         showSent(leadId);
-        scrollThreadToBottom(leadId);
-      } else if (item.status === 'cancelled') {
+        // scrollThreadToBottom is triggered by the threads useEffect above
+      } else if (item.status === "cancelled") {
         setQueueState((prev) => {
           const n = { ...prev };
           delete n[leadId];
           return n;
         });
-      } else if (item.status === 'failed') {
+      } else if (item.status === "failed") {
         setQueueState((prev) => ({
           ...prev,
-          [leadId]: { jobId: item.id, status: 'failed', error: item.error },
+          [leadId]: { jobId: item.id, status: "failed", error: item.error },
         }));
       } else {
-        // queued or active
         setQueueState((prev) => ({
           ...prev,
-          [leadId]: { jobId: item.id, status: item.status as CardQueueInfo['status'] },
+          [leadId]: { jobId: item.id, status: item.status as CardQueueInfo["status"] },
         }));
       }
     });
@@ -269,11 +277,12 @@ export default function RepliesPage() {
 
   async function generateReply(id: number) {
     const existingText = replyText[id] ?? "";
-    if (
-      existingText.trim() &&
-      !window.confirm("This will overwrite your current draft. Continue?")
-    ) {
-      return;
+    if (existingText.trim()) {
+      const confirmed = await window.api.showConfirmDialog(
+        "Overwrite Draft",
+        "This will overwrite your current draft. Continue?"
+      );
+      if (!confirmed) return;
     }
 
     setGeneratingId(id);
@@ -290,7 +299,6 @@ export default function RepliesPage() {
       };
       setThreads((prev) => ({ ...prev, [id]: conversationThread }));
       setReplyText((prev) => ({ ...prev, [id]: generatedReply }));
-      scrollThreadToBottom(id);
     } catch (err) {
       setCardError(id, err instanceof Error ? err.message : "Failed to generate reply.");
     } finally {
@@ -304,8 +312,7 @@ export default function RepliesPage() {
     const message = replyText[id] ?? "";
     if (!message.trim()) return;
 
-    // Clear any previous failed queue state before re-enqueueing
-    if (queueState[id]?.status === 'failed') {
+    if (queueState[id]?.status === "failed") {
       setQueueState((prev) => {
         const n = { ...prev };
         delete n[id];
@@ -317,28 +324,27 @@ export default function RepliesPage() {
     clearCardError(id);
     try {
       const result = await window.api.sendReply(id, message.trim());
-      if ('queued' in result && result.queued) {
+      if ("queued" in result && result.queued) {
         setQueueState((prev) => ({
           ...prev,
-          [id]: { jobId: result.jobId, status: 'queued' },
+          [id]: { jobId: result.jobId, status: "queued" },
         }));
-        // Thread update and "Sent ✓" come from the progress listener on completion.
-      } else if ('success' in result && result.success === false) {
+      } else if ("success" in result && result.success === false) {
         const errMsg = result.needsLogin
-          ? 'Your LinkedIn session has expired. Please log in again via the Compose page.'
+          ? "Your LinkedIn session has expired. Please log in again via the Compose page."
           : result.error;
         setCardError(id, errMsg);
       }
     } catch (err) {
-      setCardError(id, err instanceof Error ? err.message : 'Failed to send reply.');
+      setCardError(id, err instanceof Error ? err.message : "Failed to send reply.");
     } finally {
       setSendingId(null);
     }
   }
 
-  // ── Update (single card) ──────────────────────────────────────────────────
+  // ── Update (single lead) ──────────────────────────────────────────────────
 
-  async function updateLead(id: number) {
+  async function updateLead(id: number, silent = false) {
     setUpdatingId(id);
     clearCardError(id);
     try {
@@ -353,11 +359,12 @@ export default function RepliesPage() {
         conversationThread: OutreachThreadMessage[];
       };
       setThreads((prev) => ({ ...prev, [id]: conversationThread }));
-      scrollThreadToBottom(id);
-      showUpdateResult(
-        id,
-        newMessagesFound ? `${newMessageCount} new message${newMessageCount !== 1 ? "s" : ""} found` : "No new messages"
-      );
+      if (!silent && newMessagesFound) {
+        showUpdateResult(
+          id,
+          `${newMessageCount} new message${newMessageCount !== 1 ? "s" : ""} found`
+        );
+      }
     } catch (err) {
       setCardError(id, err instanceof Error ? err.message : "Failed to update conversation.");
     } finally {
@@ -367,8 +374,15 @@ export default function RepliesPage() {
 
   // ── Mark as Converted ────────────────────────────────────────────────────
 
+  async function handleMarkConverted(id: number, name: string) {
+    const confirmed = await window.api.showConfirmDialog(
+      "Mark as Converted",
+      `Mark "${name}" as Converted?`
+    );
+    if (confirmed) await markConverted(id);
+  }
+
   async function markConverted(id: number) {
-    setConfirmConvertedId(null);
     setMarkingConvertedId(id);
     clearCardError(id);
     try {
@@ -378,6 +392,7 @@ export default function RepliesPage() {
         return;
       }
       setLeads((prev) => prev.filter((l) => l.id !== id));
+      setSelectedLeadId(null);
       showNotification("Lead marked as Converted.");
     } catch (err) {
       setCardError(id, err instanceof Error ? err.message : "Failed to mark as converted.");
@@ -388,8 +403,15 @@ export default function RepliesPage() {
 
   // ── Mark as Cold ─────────────────────────────────────────────────────────
 
+  async function handleMarkCold(id: number, name: string) {
+    const confirmed = await window.api.showConfirmDialog(
+      "Mark as Cold",
+      `Mark "${name}" as Cold?`
+    );
+    if (confirmed) await markCold(id);
+  }
+
   async function markCold(id: number) {
-    setConfirmColdId(null);
     setMarkingColdId(id);
     clearCardError(id);
     try {
@@ -399,6 +421,7 @@ export default function RepliesPage() {
         return;
       }
       setLeads((prev) => prev.filter((l) => l.id !== id));
+      setSelectedLeadId(null);
       showNotification("Lead marked as Cold.");
     } catch (err) {
       setCardError(id, err instanceof Error ? err.message : "Failed to mark as cold.");
@@ -440,11 +463,85 @@ export default function RepliesPage() {
     await fetchLeads();
   }
 
-  // ── Render: loading / error ───────────────────────────────────────────────
+  // ── Lead selection ────────────────────────────────────────────────────────
+
+  async function loadStoredThread(id: number) {
+    setUpdatingId(id);
+    try {
+      const result = await window.api.getLeadThread(id);
+      if ("success" in result && result.success === false) return;
+      setThreads((prev) => ({ ...prev, [id]: (result as { conversationThread: OutreachThreadMessage[] }).conversationThread }));
+    } catch (err) {
+      console.error("Failed to load stored thread for lead", id, err);
+    } finally {
+      setUpdatingId(null);
+    }
+  }
+
+  function handleSelectLead(id: number) {
+    const newId = id === selectedLeadId ? null : id;
+    setSelectedLeadId(newId);
+    // Load stored messages instantly without scraping
+    if (newId !== null && threads[newId] === undefined) {
+      loadStoredThread(newId);
+    }
+  }
+
+  // ── Keyboard navigation ───────────────────────────────────────────────────
+
+  const { focusedIndex: kbFocusedIndex } = useListKeyboardNav({
+    items: leads,
+    selectedId: selectedLeadId,
+    onSelect: (id) => handleSelectLead(id),
+    getId: (l) => l.id,
+  });
+
+  // ── Context menu ─────────────────────────────────────────────────────────────
+
+  async function handleContextMenu(e: React.MouseEvent, lead: LeadWithProfile) {
+    e.preventDefault();
+    const id = lead.id;
+    const name = lead.profile.name ?? "LinkedIn Profile";
+
+    const action = await window.api.showContextMenu([
+      { id: 'reply', label: 'Reply', enabled: true },
+      { id: 'mark-converted', label: 'Mark Converted', enabled: true },
+      { id: 'mark-cold', label: 'Mark Cold', enabled: true },
+      { id: 'sep1', label: '', type: 'separator' },
+      { id: 'open-linkedin', label: 'Open LinkedIn Profile', enabled: !!lead.profile.linkedin_url },
+      { id: 'copy-url', label: 'Copy Profile URL', enabled: !!lead.profile.linkedin_url },
+    ]);
+
+    if (!action) return;
+    switch (action) {
+      case 'reply':
+        handleSelectLead(id);
+        break;
+      case 'mark-converted':
+        await handleMarkConverted(id, name);
+        break;
+      case 'mark-cold':
+        await handleMarkCold(id, name);
+        break;
+      case 'open-linkedin':
+        window.open(lead.profile.linkedin_url, '_blank', 'noopener,noreferrer');
+        break;
+      case 'copy-url':
+        await navigator.clipboard.writeText(lead.profile.linkedin_url);
+        break;
+    }
+  }
+
+  // ── Derived state ─────────────────────────────────────────────────────────
+
+  const selectedLead = leads.find((l) => l.id === selectedLeadId) ?? null;
+  const isUpdateAllRunning = updateAllState !== null;
+
+  // ── Loading / error ───────────────────────────────────────────────────────
 
   if (loading) {
     return (
-      <div className="replies-container">
+      <div className="replies-layout">
         <div className="drafts-loading">
           <span className="bulk-spinner" aria-hidden="true" />
           Loading replies…
@@ -455,7 +552,7 @@ export default function RepliesPage() {
 
   if (error) {
     return (
-      <div className="replies-container">
+      <div className="replies-layout">
         <div className="drafts-error">
           <p>{error}</p>
           <button className="btn btn-secondary" onClick={fetchLeads}>
@@ -466,335 +563,347 @@ export default function RepliesPage() {
     );
   }
 
-  const isUpdateAllRunning = updateAllState !== null;
+  // ── Left pane: lead list ──────────────────────────────────────────────────
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  const leadList = (
+    <div className="replies-list">
+      {leads.length === 0 ? (
+        <div className="drafts-list__empty">
+          <p>No replies yet.</p>
+          <p className="drafts-list__empty-hint">
+            Replies will appear here when contacts respond to your outreach.
+          </p>
+        </div>
+      ) : (
+        leads.map((lead, listIdx) => {
+          const id = lead.id;
+          const name = lead.profile.name ?? "LinkedIn Profile";
+          const isSelected = selectedLeadId === id;
+          const isKeyboardFocused = listIdx === kbFocusedIndex;
+          const lastMsg = getLastMessage(lead, threads[id]);
+          const snippet =
+            lastMsg.text
+              ? lastMsg.text.slice(0, 65) + (lastMsg.text.length > 65 ? "…" : "")
+              : "";
+          // Show unread dot while thread hasn't been loaded yet
+          const hasUnread = threads[id] === undefined;
 
-  return (
-    <div className="replies-container">
-      {/* Page header */}
-      <div className="replies-header">
-        <div className="replies-header__top">
-          <h2 className="replies-title">
-            Replies
-            {leads.length > 0 && (
-              <span className="drafts-count-badge">{leads.length}</span>
-            )}
-          </h2>
-          <div className="replies-header__actions">
-            {isUpdateAllRunning && (
-              <span className="drafts-refresh-all-progress">
-                <span className="bulk-spinner-inline" aria-hidden="true" />
-                Updating {updateAllState.current} / {updateAllState.total}…
-              </span>
-            )}
-            {!isUpdateAllRunning && updateAllResult && (
-              <span className="replies-update-all-result">
-                {updateAllResult.checked} checked · {updateAllResult.newMessages} new message{updateAllResult.newMessages !== 1 ? "s" : ""}
-              </span>
-            )}
-            <button
-              className="drafts-refresh-all-btn"
-              onClick={updateAll}
-              disabled={isUpdateAllRunning || leads.length === 0}
-              title="Re-check all replied leads for new messages"
+          return (
+            <div
+              key={id}
+              className={`replies-list-row${isSelected ? " replies-list-row--active" : ""}${isKeyboardFocused ? " replies-list-row--keyboard-focused" : ""}`}
+              onClick={() => handleSelectLead(id)}
+              onDoubleClick={() => handleSelectLead(id)}
+              onContextMenu={(e) => handleContextMenu(e, lead)}
             >
-              Update All ↻
+              {hasUnread && (
+                <span className="replies-list-row__unread" aria-label="Not yet loaded" />
+              )}
+              <div className="replies-list-row__info">
+                <span className="replies-list-row__name">{name}</span>
+                {snippet && (
+                  <span className="replies-list-row__snippet">{snippet}</span>
+                )}
+                {lastMsg.timestamp && (
+                  <span className="replies-list-row__date">{formatDate(lastMsg.timestamp)}</span>
+                )}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+
+  // ── Right pane: detail panel ──────────────────────────────────────────────
+
+  let detailPanel: React.ReactNode;
+
+  if (!selectedLead) {
+    detailPanel = (
+      <div className="replies-empty-detail">
+        <MessageSquare size={28} />
+        <p>Select a conversation from the list</p>
+      </div>
+    );
+  } else {
+    const id = selectedLead.id;
+    const name = selectedLead.profile.name ?? "LinkedIn Profile";
+    const cardError = cardErrors[id];
+    const isGenerating = generatingId === id;
+    const isUpdating = updatingId === id;
+    const isMarkingConverted = markingConvertedId === id;
+    const isMarkingCold = markingColdId === id;
+    const cardQueueInfo = queueState[id];
+    const isQueued = cardQueueInfo?.status === "queued";
+    const isActivelySending = cardQueueInfo?.status === "active" || sendingId === id;
+    const isInQueue = isQueued || isActivelySending;
+    const isQueueFailed = cardQueueInfo?.status === "failed";
+    const isBusy =
+      isGenerating || isInQueue || isUpdating || isMarkingConverted || isMarkingCold || isUpdateAllRunning;
+    const isSent = sentIds.has(id);
+    const updateResult = updateResults[id];
+    const fullThread = threads[id];
+    const currentReplyText = replyText[id] ?? "";
+
+    detailPanel = (
+      <div className="replies-detail">
+        {/* Actions toolbar */}
+        <Toolbar>
+          <div className="replies-detail__profile-info">
+            <a
+              href={selectedLead.profile.linkedin_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="replies-detail__name person-link"
+            >
+              {name}
+            </a>
+            {(selectedLead.role || selectedLead.company) && (
+              <span className="replies-detail__role">
+                {[selectedLead.role, selectedLead.company].filter(Boolean).join(" · ")}
+              </span>
+            )}
+            {selectedLead.persona && (
+              <span className={`meta-tag persona-${selectedLead.persona}`}>
+                {PERSONA_LABELS[selectedLead.persona] ?? selectedLead.persona}
+              </span>
+            )}
+            {selectedLead.message_state && (
+              <span className="meta-tag state">
+                {STATE_LABELS[selectedLead.message_state] ?? selectedLead.message_state}
+              </span>
+            )}
+          </div>
+
+          <ToolbarSpacer />
+
+          {updateResult && (
+            <span className="replies-update-result">{updateResult}</span>
+          )}
+
+          <button
+            className="btn btn-secondary btn--sm"
+            onClick={() => updateLead(id)}
+            disabled={isBusy}
+            title="Re-check for new messages"
+          >
+            {isUpdating ? (
+              <>
+                <span className="bulk-spinner-inline" aria-hidden="true" />
+                {" "}Updating…
+              </>
+            ) : (
+              <span className="btn-icon">
+                <RefreshCw size={13} /> Update
+              </span>
+            )}
+          </button>
+
+          <ToolbarDivider />
+
+          <button
+            className="btn btn-send replies-card__converted-btn btn--sm"
+            onClick={() => handleMarkConverted(id, name)}
+            disabled={isBusy}
+          >
+            <span className="btn-icon">
+              {isMarkingConverted ? "Marking…" : <><Check size={13} /> Mark Converted</>}
+            </span>
+          </button>
+          <button
+            className="btn btn-delete btn--sm"
+            onClick={() => handleMarkCold(id, name)}
+            disabled={isBusy}
+          >
+            <span className="btn-icon">
+              {isMarkingCold ? "Marking…" : <><X size={13} /> Mark Cold</>}
+            </span>
+          </button>
+        </Toolbar>
+
+        {/* Conversation thread */}
+        <div className="replies-detail__thread" ref={threadRef}>
+          {isUpdating && !fullThread ? (
+            <div className="replies-thread-loading">
+              <span className="bulk-spinner" aria-hidden="true" />
+              Loading conversation…
+            </div>
+          ) : fullThread ? (
+            fullThread.map((msg) => {
+              const isSelf = msg.sender === "self";
+              const label = messageTypeLabel(msg.message_type);
+              return (
+                <div
+                  key={msg.id}
+                  className={`replies-msg replies-msg--${isSelf ? "self" : "them"}`}
+                >
+                  <div className="replies-msg__meta">
+                    <span className="replies-msg__sender">{isSelf ? "You" : name}</span>
+                    {label && (
+                      <span className="replies-msg__type-label">{label}</span>
+                    )}
+                    {msg.sent_at && (
+                      <span className="replies-msg__date">{formatDate(msg.sent_at)}</span>
+                    )}
+                  </div>
+                  <p className="replies-msg__text">{msg.message}</p>
+                </div>
+              );
+            })
+          ) : selectedLead.recentMessages.length > 0 ? (
+            selectedLead.recentMessages.map((msg, i) => {
+              const isSelf = msg.sender === "self";
+              return (
+                <div
+                  key={i}
+                  className={`replies-msg replies-msg--${isSelf ? "self" : "them"}`}
+                >
+                  <div className="replies-msg__meta">
+                    <span className="replies-msg__sender">{isSelf ? "You" : name}</span>
+                    {msg.timestamp && (
+                      <span className="replies-msg__date">{formatDate(msg.timestamp)}</span>
+                    )}
+                  </div>
+                  <p className="replies-msg__text">{msg.content}</p>
+                </div>
+              );
+            })
+          ) : (
+            <div className="replies-thread-empty">
+              No conversation history yet.
+            </div>
+          )}
+        </div>
+
+        {/* Reply composer */}
+        <div className="replies-detail__composer">
+          <textarea
+            className="draft-textarea replies-composer__textarea"
+            placeholder="Type your reply…"
+            value={currentReplyText}
+            onChange={(e) => setReplyText((prev) => ({ ...prev, [id]: e.target.value }))}
+            disabled={isBusy}
+            rows={4}
+          />
+          <div className="replies-composer__actions">
+            <button
+              className="btn btn-regen"
+              onClick={() => generateReply(id)}
+              disabled={isBusy}
+            >
+              {isGenerating ? (
+                <>
+                  <span className="bulk-spinner-inline" aria-hidden="true" />
+                  Generating…
+                </>
+              ) : (
+                <span className="btn-icon">
+                  <Sparkles size={14} /> Generate Reply
+                </span>
+              )}
+            </button>
+            <button
+              className="btn btn-send"
+              onClick={() => sendReply(id)}
+              disabled={isBusy || !currentReplyText.trim()}
+            >
+              {isActivelySending ? (
+                <>
+                  <span className="bulk-spinner-inline" aria-hidden="true" />
+                  Sending…
+                </>
+              ) : isQueued ? (
+                "Queued"
+              ) : isSent ? (
+                <span className="btn-icon">
+                  Sent <Check size={14} />
+                </span>
+              ) : (
+                <span className="btn-icon">
+                  Send Reply <ChevronRight size={14} />
+                </span>
+              )}
             </button>
           </div>
+
+          {isQueueFailed && cardQueueInfo?.error && (
+            <div className="drafts-card__error drafts-card__error--failed">
+              <span>{cardQueueInfo.error}</span>
+              <button
+                className="btn btn-send btn--sm"
+                onClick={async () => {
+                  if (cardQueueInfo?.jobId) {
+                    await window.api.queue.retry(cardQueueInfo.jobId);
+                  }
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {cardError && (
+            <div className="drafts-card__error">{cardError}</div>
+          )}
         </div>
       </div>
+    );
+  }
 
-      {/* Empty state */}
-      {leads.length === 0 && (
+  // ── Main render ───────────────────────────────────────────────────────────
+
+  return (
+    <div className="replies-layout">
+      {/* Top toolbar */}
+      <Toolbar>
+        {leads.length > 0 && (
+          <span className="toolbar__count">
+            {leads.length} repl{leads.length !== 1 ? "ies" : "y"}
+          </span>
+        )}
+        <ToolbarSpacer />
+        {isUpdateAllRunning && (
+          <span className="drafts-refresh-all-progress">
+            <span className="bulk-spinner-inline" aria-hidden="true" />
+            Updating {updateAllState.current} / {updateAllState.total}…
+          </span>
+        )}
+        {!isUpdateAllRunning && updateAllResult && (
+          <span className="replies-update-all-result">
+            {updateAllResult.checked} checked · {updateAllResult.newMessages} new message
+            {updateAllResult.newMessages !== 1 ? "s" : ""}
+          </span>
+        )}
+        <button
+          className="toolbar__btn"
+          onClick={updateAll}
+          disabled={isUpdateAllRunning || leads.length === 0}
+          title="Re-check all replied leads for new messages"
+        >
+          <RefreshCw size={14} /> Update All
+        </button>
+      </Toolbar>
+
+      {/* Empty state (no leads) */}
+      {leads.length === 0 ? (
         <div className="drafts-empty">
           <p>No replies yet.</p>
           <p className="drafts-empty__hint">
             Replies will appear here automatically when contacts respond to your outreach.
           </p>
         </div>
+      ) : (
+        <SplitPane
+          storageKey="replies-split-width"
+          defaultLeftWidth={280}
+          minLeftWidth={200}
+          maxLeftWidth={420}
+          left={leadList}
+          right={detailPanel}
+        />
       )}
 
-      {/* Card list */}
-      <div className="drafts-card-list">
-        {leads.map((lead) => {
-          const id = lead.id;
-          const name = lead.profile.name ?? "LinkedIn Profile";
-          const cardError = cardErrors[id];
-          const isGenerating = generatingId === id;
-          const isUpdating = updatingId === id;
-          const isMarkingConverted = markingConvertedId === id;
-          const isMarkingCold = markingColdId === id;
-          const cardQueueInfo = queueState[id];
-          const isQueued = cardQueueInfo?.status === 'queued';
-          const isActivelySending = cardQueueInfo?.status === 'active' || sendingId === id;
-          const isInQueue = isQueued || isActivelySending;
-          const isQueueFailed = cardQueueInfo?.status === 'failed';
-          const isBusy =
-            isGenerating || isInQueue || isUpdating || isMarkingConverted || isMarkingCold || isUpdateAllRunning;
-          const isSent = sentIds.has(id);
-          const updateResult = updateResults[id];
-          const fullThread = threads[id];
-          const currentReplyText = replyText[id] ?? "";
-
-          return (
-            <div key={id} className="drafts-card replies-card">
-              {/* Card header */}
-              <div className="drafts-card__header" style={{ cursor: "default" }}>
-                <div className="drafts-card__identity">
-                  <a
-                    href={lead.profile.linkedin_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="drafts-card__name person-link"
-                  >
-                    {name}
-                  </a>
-                  {(lead.role || lead.company) && (
-                    <span className="drafts-card__role">
-                      {[lead.role, lead.company].filter(Boolean).join(" · ")}
-                    </span>
-                  )}
-                  {lead.persona && (
-                    <span className={`meta-tag persona-${lead.persona}`}>
-                      {PERSONA_LABELS[lead.persona] ?? lead.persona}
-                    </span>
-                  )}
-                  {lead.message_state && (
-                    <span className="meta-tag state">
-                      {STATE_LABELS[lead.message_state] ?? lead.message_state}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Conversation thread */}
-              <div
-                className="replies-thread"
-                ref={(el) => { threadRefs.current[id] = el; }}
-              >
-                {fullThread ? (
-                  fullThread.map((msg) => {
-                    const isSelf = msg.sender === "self";
-                    const label = messageTypeLabel(msg.message_type);
-                    return (
-                      <div
-                        key={msg.id}
-                        className={`replies-msg replies-msg--${isSelf ? "self" : "them"}`}
-                      >
-                        <div className="replies-msg__meta">
-                          <span className="replies-msg__sender">
-                            {isSelf ? "You" : name}
-                          </span>
-                          {label && (
-                            <span className="replies-msg__type-label">{label}</span>
-                          )}
-                          {msg.sent_at && (
-                            <span className="replies-msg__date">{formatDate(msg.sent_at)}</span>
-                          )}
-                        </div>
-                        <p className="replies-msg__text">{msg.message}</p>
-                      </div>
-                    );
-                  })
-                ) : (
-                  lead.recentMessages.length === 0 ? (
-                    <span className="drafts-card__no-msgs">No conversation history yet. Click Update to load.</span>
-                  ) : (
-                    lead.recentMessages.map((msg, i) => {
-                      const isSelf = msg.sender === "self";
-                      return (
-                        <div
-                          key={i}
-                          className={`replies-msg replies-msg--${isSelf ? "self" : "them"}`}
-                        >
-                          <div className="replies-msg__meta">
-                            <span className="replies-msg__sender">
-                              {isSelf ? "You" : name}
-                            </span>
-                            {msg.timestamp && (
-                              <span className="replies-msg__date">{formatDate(msg.timestamp)}</span>
-                            )}
-                          </div>
-                          <p className="replies-msg__text">{msg.content}</p>
-                        </div>
-                      );
-                    })
-                  )
-                )}
-              </div>
-
-              {/* Reply composer */}
-              <div className="replies-composer">
-                <textarea
-                  className="draft-textarea replies-composer__textarea"
-                  placeholder="Type your reply…"
-                  value={currentReplyText}
-                  onChange={(e) => setReplyText((prev) => ({ ...prev, [id]: e.target.value }))}
-                  disabled={isBusy}
-                  rows={4}
-                />
-                <div className="replies-composer__actions">
-                  <button
-                    className="btn btn-regen"
-                    onClick={() => generateReply(id)}
-                    disabled={isBusy}
-                  >
-                    {isGenerating ? (
-                      <>
-                        <span className="bulk-spinner-inline" aria-hidden="true" />
-                        Generating…
-                      </>
-                    ) : (
-                      "✦ Generate Reply"
-                    )}
-                  </button>
-                  <button
-                    className="btn btn-send"
-                    onClick={() => sendReply(id)}
-                    disabled={isBusy || !currentReplyText.trim()}
-                  >
-                    {isActivelySending ? (
-                      <>
-                        <span className="bulk-spinner-inline" aria-hidden="true" />
-                        Sending…
-                      </>
-                    ) : isQueued ? (
-                      'Queued'
-                    ) : isSent ? (
-                      'Sent ✓'
-                    ) : (
-                      'Send Reply ▸'
-                    )}
-                  </button>
-                </div>
-
-                {isQueueFailed && cardQueueInfo?.error && (
-                  <div className="drafts-card__error drafts-card__error--failed">
-                    <span>{cardQueueInfo.error}</span>
-                    <button
-                      className="btn btn-send btn--sm"
-                      onClick={async () => {
-                        if (cardQueueInfo?.jobId) {
-                          // Re-enqueue the failed job; progress event will update state
-                          await window.api.queue.retry(cardQueueInfo.jobId);
-                        }
-                      }}
-                    >
-                      Retry
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Inline Converted confirmation */}
-              {confirmConvertedId === id && (
-                <div className="drafts-confirm">
-                  <span className="drafts-confirm__text">
-                    Mark {name} as converted? This is permanent.
-                  </span>
-                  <div className="drafts-confirm__actions">
-                    <button
-                      className="btn btn-send btn--sm"
-                      onClick={() => markConverted(id)}
-                    >
-                      Confirm
-                    </button>
-                    <button
-                      className="btn btn-secondary btn--sm"
-                      onClick={() => setConfirmConvertedId(null)}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Inline Cold confirmation */}
-              {confirmColdId === id && (
-                <div className="drafts-confirm">
-                  <span className="drafts-confirm__text">
-                    Mark {name} as cold?
-                  </span>
-                  <div className="drafts-confirm__actions">
-                    <button
-                      className="btn btn-delete btn--sm"
-                      onClick={() => markCold(id)}
-                    >
-                      Confirm
-                    </button>
-                    <button
-                      className="btn btn-secondary btn--sm"
-                      onClick={() => setConfirmColdId(null)}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Action buttons */}
-              <div className="drafts-card__actions replies-card__actions">
-                <button
-                  className="btn btn-send replies-card__converted-btn"
-                  onClick={() => {
-                    setConfirmColdId(null);
-                    setConfirmConvertedId(id === confirmConvertedId ? null : id);
-                  }}
-                  disabled={isBusy}
-                >
-                  {isMarkingConverted ? "Marking…" : "Mark as Converted ✓"}
-                </button>
-
-                <button
-                  className="btn btn-delete"
-                  onClick={() => {
-                    setConfirmConvertedId(null);
-                    setConfirmColdId(id === confirmColdId ? null : id);
-                  }}
-                  disabled={isBusy}
-                >
-                  {isMarkingCold ? "Marking…" : "Mark as Cold ✗"}
-                </button>
-
-                <button
-                  className="btn btn-refresh"
-                  onClick={() => updateLead(id)}
-                  disabled={isBusy}
-                >
-                  {isUpdating ? (
-                    <>
-                      <span className="bulk-spinner-inline" aria-hidden="true" />
-                      Updating…
-                    </>
-                  ) : (
-                    "Update ↻"
-                  )}
-                </button>
-              </div>
-
-              {/* Update result indicator */}
-              {updateResult && (
-                <div className="replies-update-result">
-                  {updateResult}
-                </div>
-              )}
-
-              {/* Per-card inline error */}
-              {cardError && (
-                <div className="drafts-card__error">{cardError}</div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Toast notification */}
-      {notification && (
-        <div className="tracking-toast" role="status">
-          {notification}
-        </div>
-      )}
     </div>
   );
 }

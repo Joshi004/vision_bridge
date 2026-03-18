@@ -1,6 +1,27 @@
 export {}
 
 declare global {
+  interface ContextMenuItem {
+    id: string
+    label: string
+    type?: 'separator'
+    enabled?: boolean
+    accelerator?: string
+  }
+
+  interface ActivityStep {
+    stepId: string
+    label: string
+    status: 'pending' | 'active' | 'completed' | 'failed' | 'skipped'
+    detail?: string
+    error?: string
+    startedAt?: number
+    completedAt?: number
+    jobId?: string
+  }
+
+  type ActivityStepHandler = (event: unknown, step: ActivityStep) => void
+
   interface ScrapeLogEntry {
     level: 'INFO' | 'DEBUG' | 'ERROR'
     component: string
@@ -214,6 +235,7 @@ declare global {
     result?: unknown
     error?: string
     createdAt: number
+    startedAt?: number
     completedAt?: number
   }
 
@@ -233,12 +255,20 @@ declare global {
 
   interface Window {
     api: {
+      platform: string
+
+      onMenuNavigate: (callback: (path: string) => void) => (event: unknown, path: unknown) => void
+      offMenuNavigate: (handler: (event: unknown, path: unknown) => void) => void
+      onMenuAction: (callback: (action: string) => void) => (event: unknown, action: unknown) => void
+      offMenuAction: (handler: (event: unknown, action: unknown) => void) => void
       scrape(url: string, forceScrape: boolean): Promise<ScrapeResult>
       scrapeBulk(urls: string[], forceScrape: boolean): Promise<BulkScrapeResult>
       cancelBulkScrape(): Promise<{ success: true }>
       login(): Promise<{ success: true } | ErrorResult>
       onScrapeLog(callback: (entry: ScrapeLogEntry) => void): ScrapeLogHandler
       offScrapeLog(handler: ScrapeLogHandler): void
+      onActivityStep(callback: (step: ActivityStep) => void): ActivityStepHandler
+      offActivityStep(handler: ActivityStepHandler): void
       onBulkProgress(callback: (data: BulkProgressEvent) => void): BulkProgressHandler
       offBulkProgress(handler: BulkProgressHandler): void
       openLogsFolder(): Promise<void>
@@ -289,6 +319,10 @@ declare global {
         | { newMessagesFound: boolean; newMessageCount: number; conversationThread: OutreachThreadMessage[] }
         | { success: false; error: string }
       >
+      getLeadThread(leadId: number): Promise<
+        | { conversationThread: OutreachThreadMessage[] }
+        | { success: false; error: string }
+      >
       queue: {
         getStatus(): Promise<QueueStatusResponse>
         cancel(jobId: string): Promise<{ success: boolean }>
@@ -301,6 +335,8 @@ declare global {
         onSessionExpired(callback: () => void): (event: unknown) => void
         removeSessionExpiredListener(handler: (event: unknown) => void): void
       }
+      showContextMenu(items: ContextMenuItem[]): Promise<string | null>
+      showConfirmDialog(title: string, message: string, detail?: string): Promise<boolean>
     }
   }
 }
